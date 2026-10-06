@@ -1,0 +1,19 @@
+class {{.RepoName}}:
+    """Encapsulates all database operations for {{.ServiceName}}."""
+
+    def __init__(self, db_router: {{.RouterClass}}):
+        self.db_router = db_router
+
+{{.RepoBlocks}}
+
+
+class {{.ClassName}}:
+    """{{.ServiceName}} — converted from {{.SourcePath}} (BP rubric v1)."""
+
+    def __init__(self, repo: Optional[{{.RepoName}}] = None, db_router: Optional[{{.RouterClass}}] = None):
+        # BP-5: the router context manager owns commit/rollback; DI keeps the
+        # service unit-testable.
+        self.db_router = db_router or {{.RouterClass}}()
+        self.repo = repo or {{.RepoName}}(self.db_router)
+
+{{.Body}}

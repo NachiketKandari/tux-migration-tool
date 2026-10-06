@@ -1,0 +1,188 @@
+func (suite *{{.SuiteName}}) Test{{.Name}}() {
+{{- if .Query}}
+	// The store's own SQL literal, reused in every expectation below.
+	query := `{{.Query}}`
+{{- end}}
+{{- if .IsDML}}
+	testCases := []struct {
+		desc           string
+		rowsAffected   int64
+		mockError      string
+		expectedError  string
+	}{
+		{
+			desc:          "ExecError",
+			mockError:     "ORA Error",
+			expectedError: "ORA Error",
+		},
+{{- if .ToleratesNoRows}}
+		{
+			desc:          "Success-NoRows",
+			rowsAffected:  0,
+			expectedError: "",
+		},
+{{- else}}
+		{
+			desc:          "NoRows",
+			rowsAffected:  0,
+			expectedError: "{{.NoRowsError}}",
+		},
+{{- end}}
+		{
+			desc:          "Success",
+			rowsAffected:  1,
+			expectedError: "",
+		},
+	}
+
+	for _, testCase := range testCases {
+		suite.T().Run(testCase.desc, func(t *testing.T) {
+{{- if .IsTx}}
+			suite.sqlMock.ExpectBegin()
+{{- end}}
+			// Mocking and Setting Expected Result
+			if testCase.mockError != "" {
+				suite.sqlMock.
+					ExpectExec({{if .Query}}regexp.QuoteMeta(query){{else}}"{{.Regex}}"{{end}}).
+					WillReturnError(errors.New(testCase.mockError))
+			} else {
+				suite.sqlMock.
+					ExpectExec({{if .Query}}regexp.QuoteMeta(query){{else}}"{{.Regex}}"{{end}}).
+					WillReturnResult(sqlmock.NewResult(1, testCase.rowsAffected))
+			}
+
+{{- if .IsTx}}
+			tx, _ := suite.sqlDB.Beginx()
+{{- end}}
+			// Triggering Function
+			err := suite.{{.StoreVar}}.{{.Name}}(suite.ctx{{if .IsTx}}, tx{{end}}{{range .CallArgs}}, {{.}}{{end}})
+
+			// Validations
+			if testCase.expectedError != "" {
+				assert.ErrorContains(t, err, testCase.expectedError)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+{{- else}}
+{{- if .IsTx}}
+	testCases := []struct {
+		desc           string
+		mockInput      *sqlmock.Rows
+		expectedError  string
+		expectedOutput {{.ExpectType}}
+	}{
+		{
+			desc:          "SQLError",
+			mockInput:     nil,
+			expectedError: "ORA Error",
+		},
+{{- if .HasAlt}}
+		{
+			desc:           "{{.AltDesc}}",
+			mockInput:      sqlmock.NewRows([]string{ {{range .Cols}}"{{.}}", {{end}}}){{if .AltRow}}.AddRow({{range .AltRow}}"{{.}}", {{end}}){{end}},
+			expectedError:  "",
+			expectedOutput: {{.AltExpect}},
+		},
+{{- end}}
+		{
+			desc:           "Success",
+			mockInput:      sqlmock.NewRows([]string{ {{range .Cols}}"{{.}}", {{end}}}){{if .Row}}.AddRow({{range .Row}}"{{.}}", {{end}}){{end}},
+			expectedError:  "",
+			expectedOutput: {{.ExpectExpr}},
+		},
+	}
+
+	for _, testCase := range testCases {
+		suite.T().Run(testCase.desc, func(t *testing.T) {
+			suite.sqlMock.ExpectBegin()
+			// Mocking and Setting Expected Result
+			if testCase.mockInput != nil {
+				suite.sqlMock.
+					ExpectQuery({{if .Query}}regexp.QuoteMeta(query){{else}}"{{.Regex}}"{{end}}).
+					WillReturnRows(testCase.mockInput)
+			} else {
+				suite.sqlMock.
+					ExpectQuery({{if .Query}}regexp.QuoteMeta(query){{else}}"{{.Regex}}"{{end}}).
+					WillReturnError(errors.New("ORA Error"))
+			}
+
+			tx, _ := suite.sqlDB.Beginx()
+
+			// Triggering Function
+			actualOutput, err := suite.{{.StoreVar}}.{{.Name}}(suite.ctx, tx{{range .CallArgs}}, {{.}}{{end}})
+
+			// Validations
+			if testCase.expectedError != "" {
+				assert.ErrorContains(t, err, testCase.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, actualOutput, testCase.expectedOutput)
+			}
+		})
+	}
+{{- else}}
+	testCases := []struct {
+		desc           string
+		mockInput      *sqlmock.Rows
+		expectedError  string
+		expectedOutput {{.ExpectType}}
+	}{
+		{
+			desc:          "SQLError",
+			mockInput:     nil,
+			expectedError: "ORA Error",
+		},
+{{- if .NoRows}}
+		{
+			desc:           "Success-NoRows",
+			mockInput:      sqlmock.NewRows([]string{ {{range .Cols}}"{{.}}", {{end}}}),
+			expectedError:  "{{.NoRowsError}}",
+			expectedOutput: {{.NoRowsExpr}},
+		},
+{{- end}}
+{{- if .HasAlt}}
+		{
+			desc:           "{{.AltDesc}}",
+			mockInput:      sqlmock.NewRows([]string{ {{range .Cols}}"{{.}}", {{end}}}){{if .AltRow}}.AddRow({{range .AltRow}}"{{.}}", {{end}}){{end}},
+			expectedError:  "",
+			expectedOutput: {{.AltExpect}},
+		},
+{{- end}}
+		{
+			desc:           "Success",
+			mockInput:      sqlmock.NewRows([]string{ {{range .Cols}}"{{.}}", {{end}}}){{if .Row}}.AddRow({{range .Row}}"{{.}}", {{end}}){{end}},
+			expectedError:  "",
+			expectedOutput: {{.ExpectExpr}},
+		},
+	}
+
+	for _, testCase := range testCases {
+		suite.T().Run(testCase.desc, func(t *testing.T) {
+			// Mocking and Setting Expected Result
+			if testCase.mockInput != nil {
+				suite.sqlMock.
+					ExpectQuery({{if .Query}}regexp.QuoteMeta(query){{else}}"{{.Regex}}"{{end}}).
+					WillReturnRows(testCase.mockInput)
+			} else {
+				suite.sqlMock.
+					ExpectQuery({{if .Query}}regexp.QuoteMeta(query){{else}}"{{.Regex}}"{{end}}).
+					WillReturnError(errors.New("ORA Error"))
+			}
+
+			// Triggering Function
+			actualOutput, err := suite.{{.StoreVar}}.{{.Name}}(suite.ctx{{range .CallArgs}}, {{.}}{{end}})
+
+			// Validations
+			if testCase.expectedError != "" {
+				assert.ErrorContains(t, err, testCase.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, actualOutput, testCase.expectedOutput)
+			}
+		})
+	}
+{{- end}}
+{{- end}}
+}

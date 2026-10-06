@@ -1,0 +1,7 @@
+    def {{.Name}}(self) -> int:
+        """{{.Doc}}"""
+        with self.db_router.get_connection(mode={{.WriteMode}}) as conn:
+            with conn.cursor() as cur:
+                cur.execute({{.Const}})
+                cur.execute({{.Const2}})
+                return cur.rowcount

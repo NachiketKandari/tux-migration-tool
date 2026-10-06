@@ -1,0 +1,12 @@
+func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context, tx *sqlx.Tx{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+
+	query := `{{.Query}}`
+
+	_, err := tx.ExecContext({{.CtxName}}, query, {{.ArgList}})
+	if err != nil {
+		logger.Log({{.CtxName}}).Error("unable to delete")
+		return err
+	}
+
+	return nil
+}

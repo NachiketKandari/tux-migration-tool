@@ -1,0 +1,4 @@
+def {{.Name}}(cursor: oracledb.Cursor) -> List[Tuple]:
+    """Fetches the {{.Source}} rows."""
+    cursor.execute({{.Const}})
+    return cursor.fetchall()

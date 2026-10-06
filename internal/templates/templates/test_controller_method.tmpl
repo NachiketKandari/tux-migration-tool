@@ -1,0 +1,61 @@
+// run test | debug test
+func (suite *{{.SuiteName}}) Test{{.Name}}() {
+	testCases := []struct {
+		desc           string
+{{- range .ReqFields}}
+		{{.Name}}      {{if .Type}}{{.Type}}{{else}}string{{end}}
+{{- end}}
+{{- range .CallsOrDerived}}
+		{{.Field}}      []any
+{{- end}}
+		expectedError  string
+		expectedOutput {{.ExpectType}}
+	}{
+{{- range $i, $c := .CasesOrDerived}}
+		{
+			desc:          "{{$c.Desc}}",
+{{- range $c.ReqFields}}
+			{{.Name}}:     {{.Expr}},
+{{- end}}
+{{- range $j, $in := $c.Inputs}}
+{{- with index $.CallsOrDerived $j}}
+			{{.Field}}:     {{$in}},
+{{- end}}
+{{- end}}
+			expectedError:  "{{$c.ExpectedError}}",
+			expectedOutput: {{$c.ExpectedOutput}},
+		},
+{{- end}}
+	}
+
+	for _, testCase := range testCases {
+		suite.T().Run(testCase.desc, func(t *testing.T) {
+			// Mocking and Setting Expected Result
+
+{{- range .CallsOrDerived}}
+			if testCase.{{.Field}} != nil {
+				suite.{{$.StoreVar}}.
+					EXPECT().
+					{{.Method}}({{if .TakesCtx}}gomock.Any(){{end}}{{range .Args}}, {{.}}{{end}}).
+					Return(testCase.{{.Field}}...)
+			}
+{{- end}}
+
+			// Triggering Function
+{{- if .NoRequest}}
+			actualOutput, err := suite.{{.CtrlVar}}.{{.Name}}(suite.ctx)
+{{- else}}
+			request := &{{.ReqExpr}}
+			actualOutput, err := suite.{{.CtrlVar}}.{{.Name}}(suite.ctx, request)
+{{- end}}
+
+			// Validations
+			if testCase.expectedError != "" {
+				assert.ErrorContains(t, err, testCase.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, actualOutput, testCase.expectedOutput)
+			}
+		})
+	}
+}

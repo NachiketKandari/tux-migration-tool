@@ -1,0 +1,22 @@
+func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context, tx *sqlx.Tx{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+
+	logger.Log({{.CtxName}}).Debug("{{.Name}}")
+
+	query := `{{.Query}}`
+
+	result, err := tx.ExecContext({{.CtxName}}, query, {{.ArgList}})
+	if err != nil {
+		logger.Log({{.CtxName}}).Error("Error executing query", zap.Error(err))
+		return err
+	}
+
+	count, _ := result.RowsAffected()
+
+	if count == 0 {
+		logger.Log({{.CtxName}}).Error(sql.ErrNoRows.Error())
+		return sql.ErrNoRows
+	}
+
+	logger.Log({{.CtxName}}).Debug("{{.SuccessMsg}}")
+	return nil
+}

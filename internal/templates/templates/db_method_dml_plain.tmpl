@@ -1,0 +1,22 @@
+{{- if .Doc}}{{.Doc}}
+{{- end}}
+func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+	logger.Log({{.CtxName}}).Debug("{{.Name}}")
+
+	query := `{{.Query}}`
+
+	result, err := {{.Receiver}}.db.ExecContext({{.CtxName}}, query, {{.ArgList}})
+	if err != nil {
+		logger.Log({{.CtxName}}).Error("Error executing query", zap.Error(err))
+		return err
+	}
+
+	count, _ := result.RowsAffected()
+
+	if count > 0 {
+		logger.Log({{.CtxName}}).Debug("{{.Name}} executed successfully")
+		return nil
+	}
+
+	return sql.ErrNoRows
+}

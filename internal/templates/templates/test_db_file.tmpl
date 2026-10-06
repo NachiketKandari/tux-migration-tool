@@ -1,0 +1,54 @@
+package {{.Package}}
+
+import (
+	"context"
+{{- if .NeedsSQL}}
+	"database/sql"
+{{- end}}
+	"errors"
+{{- if .NeedsRegexp}}
+	"regexp"
+{{- end}}
+	"{{.LoggerPkg}}"
+{{- if .NeedsModels}}
+	"{{.ModelsPkg}}"
+{{- end}}
+	"testing"
+	"{{.UtilsPkg}}"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jmoiron/sqlx"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
+)
+
+/*
+MockGen
+{{.MockGenCmd}}
+
+Coverage
+{{.CoverageCmd}}
+*/
+
+type {{.SuiteName}} struct {
+	suite.Suite
+	ctx     context.Context
+	sqlDB   *sqlx.DB
+	sqlMock sqlmock.Sqlmock
+	{{.StoreVar}} {{.IfaceName}}
+}
+
+func Test{{.SuiteName}}(t *testing.T) {
+	suite.Run(t, new({{.SuiteName}}))
+}
+
+func (suite *{{.SuiteName}}) SetupSuite() {
+	logger.LoggerInit("", -1)
+
+	suite.ctx = context.TODO()
+	suite.sqlDB, suite.sqlMock = utils.NewSqlxMockDB()
+	suite.{{.StoreVar}} = {{.CtorCall}}
+}
+{{range .Methods}}
+{{.}}
+{{end}}

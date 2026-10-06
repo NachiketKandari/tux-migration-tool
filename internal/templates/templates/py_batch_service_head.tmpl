@@ -1,0 +1,7 @@
+class {{.ClassName}}:
+    """{{.ServiceName}} — converted from {{.SourcePath}} (BP rubric v1)."""
+
+    def __init__(self, db_router: {{.RouterClass}} = None):
+        # BP-5: the router context manager owns commit/rollback; DI keeps the
+        # service unit-testable with a router double.
+        self.db_router = db_router or {{.RouterClass}}()

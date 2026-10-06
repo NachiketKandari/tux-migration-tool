@@ -1,0 +1,22 @@
+    def {{.Method}}(self) -> int:
+        """Phase {{.Index}}: cursor {{.Cursor}} → {{.Table}} ({{.Mode}} DML)."""
+        logger.info("Phase {{.Index}}: fetching rows for cursor {{.Cursor}}")
+        with self.db_router.get_connection(mode={{.ReadMode}}) as conn:
+            with conn.cursor() as cur:
+                rows = {{.FetchFn}}(cur)
+        if not rows:
+            logger.info("No data found for {{.Cursor}}")
+            return 0
+        logger.info("{{.Cursor}}: %d rows to process", len(rows))
+        total = 0
+        with self.db_router.get_connection(mode={{.WriteMode}}) as conn:
+            with conn.cursor() as cur:
+{{- if eq .Mode "batch"}}
+                for i in range(0, len(rows), CHUNK_SIZE):
+                    total += {{.DMLFn}}(cur, rows[i:i + CHUNK_SIZE])
+                    logger.info("number of recs processed is %d", total)
+{{- else}}
+                for row in rows:
+                    total += {{.DMLFn}}_row(cur, row)
+{{- end}}
+        return total

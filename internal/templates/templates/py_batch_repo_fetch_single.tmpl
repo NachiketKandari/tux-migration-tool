@@ -1,0 +1,10 @@
+    def {{.Name}}(self{{range .Binds}}, {{.}}: Any{{end}}) -> Optional[Tuple]:
+        """{{.Doc}}"""
+        with self.db_router.get_connection(mode={{.ReadMode}}) as conn:
+            with conn.cursor() as cur:
+{{- if .HasBinds}}
+                cur.execute({{.Const}}, {{.BindKwargs}})
+{{- else}}
+                cur.execute({{.Const}})
+{{- end}}
+                return cur.fetchone()

@@ -1,0 +1,96 @@
+// run test | debug test
+func (suite *{{.SuiteName}}) Test{{.Name}}() {
+	testCases := []struct {
+		desc                  string
+{{- range .ReqFields}}
+		{{.Name}}             {{if .Type}}{{.Type}}{{else}}string{{end}}
+{{- end}}
+		mockInput             []any
+		expectedError         string
+		expectFailure         bool
+	}{
+{{- range $i, $c := .CasesOrDerived}}
+		{
+			desc: "{{$c.Desc}}",
+{{- range $c.ReqFields}}
+			{{.Name}}: {{.Expr}},
+{{- end}}
+			mockInput:     {{$c.Input}},
+			expectedError: "{{$c.ExpectedError}}",
+{{- if $c.ExpectFailure}}
+			expectFailure: true,
+{{- end}}
+		},
+{{- end}}
+	}
+
+	for _, testCase := range testCases {
+		suite.T().Run(testCase.desc, func(t *testing.T) {
+			// Mocking and Setting Expected Result
+			request := {{.ReqInit}}
+
+			response, ctx := utils.CreateTestGinContext(http.MethodPost, request, nil, nil, nil)
+			if testCase.mockInput != nil {
+				suite.{{.CtrlMockVar}}.
+					EXPECT().
+					{{.CtrlMethod}}(ctx{{range .CtrlCallArgs}}, {{.}}{{end}}).
+					Return(testCase.mockInput...)
+			}
+
+			// Triggering Function
+			suite.{{.HandlerVar}}.{{.Name}}(ctx)
+			if response.Code == http.StatusNoContent {
+				assert.Empty(t, response.Body.String(), "Expected empty body for 204 No Content")
+				return
+			}
+
+			var httpResponse network.HttpResponse
+			err := json.Unmarshal(response.Body.Bytes(), &httpResponse)
+			if err != nil {
+				suite.T().Errorf("unable to unmarshal response: %v\nresponse body: %s", err, response.Body.String())
+				return
+			}
+
+			// Validations
+			//
+			// The envelope's own Status and description are asserted, not a
+			// numeric status code. The code is chosen by the host's
+			// GinContext — Success→200, Failure→404, BadRequest→400 in the
+			// corpus — which is outside the service being scanned, so
+			// asserting a number here would be a guess. The old template
+			// asserted 500 for a controller error and 204 for "No Data
+			// Found", neither of which the service produces.
+			if testCase.expectedError != "" {
+				assert.Equal(t, httpResponse.Status, "failure")
+				assert.Contains(t, httpResponse.Error.Description, testCase.expectedError)
+			} else if testCase.expectFailure {
+				// The binder refused the request. The failure Status is this
+				// service's own choice; the description is the validator
+				// library's wording and is deliberately not asserted.
+				assert.Equal(t, httpResponse.Status, "failure")
+			} else {
+				// An empty payload is a legitimate 204, not a failure: the
+				// corpus answers No Content when the controller returns no
+				// data, and gin writes no body for it.
+				if response.Code == http.StatusNoContent {
+					return
+				}
+				assert.Equal(t, response.Code, http.StatusOK)
+				assert.Equal(t, httpResponse.Status, "success")
+
+				actualResponse, _ := utils.TypeConverter[{{.RespType}}](httpResponse.Data)
+				if testCase.mockInput[0] == nil {
+					// An empty success carries no data. TypeConverter hands
+					// back a non-nil POINTER to the (nil) payload, so the
+					// nil check is on the dereferenced value: that is where
+					// the nil pointer or nil slice lives. Asserting on the
+					// pointer itself was "Expected nil, but got:
+					// (**models.AssessQnAResponse)(0x…)" on every empty case.
+					assert.Nil(t, *actualResponse)
+				} else {
+					assert.Equal(t, testCase.mockInput[0], *actualResponse)
+				}
+			}
+		})
+	}
+}

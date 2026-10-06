@@ -1,0 +1,60 @@
+package {{.Package}}
+
+import (
+	"context"
+{{- if .NeedsSQL}}
+	"database/sql"
+{{- end}}
+	"errors"
+	"{{.DBPkg}}"
+	"{{.LoggerPkg}}"
+	"{{.ModelsPkg}}"
+{{- if .NeedsTime}}
+	"time"
+{{- end}}
+	"testing"
+
+	"{{if .GomockPkg}}{{.GomockPkg}}{{else}}go.uber.org/mock{{end}}/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
+)
+
+/*
+MockGen
+{{.MockGenCmd}}
+
+Coverage
+{{.CoverageCmd}}
+*/
+
+type {{.SuiteName}} struct {
+	suite.Suite
+	ctx            context.Context
+	mockController *gomock.Controller
+	{{.StoreVar}} *{{.MockType}}
+	{{.CtrlVar}}  {{.CtrlIface}}
+}
+
+// run test | debug test
+func Test{{.SuiteName}}(t *testing.T) {
+	suite.Run(t, new({{.SuiteName}}))
+}
+
+func (suite *{{.SuiteName}}) SetupSuite() {
+	logger.LoggerInit("", -1)
+
+	suite.ctx = context.TODO()
+}
+
+func (suite *{{.SuiteName}}) SetupTest() {
+	suite.mockController = gomock.NewController(suite.T())
+	suite.{{.StoreVar}} = {{.MockCtor}}
+	suite.{{.CtrlVar}} = {{.CtorCall}}
+}
+
+func (suite *{{.SuiteName}}) TearDownTest() {
+	suite.mockController.Finish()
+}
+{{range .Methods}}
+{{.}}
+{{end}}

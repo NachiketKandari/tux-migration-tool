@@ -1,0 +1,10 @@
+using System.Data;
+
+namespace {{.Namespace}}
+{
+    public interface I{{.Repo}}
+    {
+{{range .Endpoints}}{{range .Queries}}        {{if .DML}}Task<int> {{.MethodName}}({{.SigArgs}}CancellationToken ct);{{else}}Task<DataTable> {{.MethodName}}({{.SigArgs}}CancellationToken ct);{{end}}
+
+{{end}}{{end}}    }
+}

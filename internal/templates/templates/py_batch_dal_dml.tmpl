@@ -1,0 +1,15 @@
+{{if eq .Mode "batch"}}def {{.Name}}(cursor: oracledb.Cursor, records: List[Tuple]) -> int:
+    """Executes {{.Const}} for the given rows."""
+{{- if .HasBinds}}
+    cursor.executemany({{.Const}}, [({{.Projection}}) for r in records])
+{{- else}}
+    cursor.execute({{.Const}})
+{{- end}}
+    return cursor.rowcount{{else}}def {{.Name}}_row(cursor: oracledb.Cursor, row: Tuple) -> int:
+    """Executes {{.Const}} for one row."""
+{{- if .HasBinds}}
+    cursor.execute({{.Const}}, ({{.RowProjection}}))
+{{- else}}
+    cursor.execute({{.Const}})
+{{- end}}
+    return cursor.rowcount{{end}}

@@ -1,0 +1,26 @@
+{{range .Usings}}using {{.}};
+{{end}}
+namespace {{.Namespace}}
+{
+    public class {{.Repo}} : I{{.Repo}}
+    {
+        private readonly ILogger<{{.Repo}}> _logger;
+        private readonly IDbHelper _dbHelperService;
+
+        public {{.Repo}}(ILogger<{{.Repo}}> logger, IDbHelper dbHelperService)
+        {
+            _logger = logger;
+            _dbHelperService = dbHelperService;
+        }
+{{range .Endpoints}}{{range .Queries}}
+        public async {{if .DML}}Task<int>{{else}}Task<DataTable>{{end}} {{.MethodName}}({{.SigArgs}}CancellationToken ct)
+        {
+            try
+            {
+                var parameters = new[] { {{.OracleArgs}} };
+                {{if .DML}}return await _dbHelperService.ExecuteNonQueryAsync({{$.QueriesCls}}.{{.Name}}, CommandType.Text, parameters, ct);{{else}}return await _dbHelperService.ExecuteQueryAsync({{$.QueriesCls}}.{{.Name}}, CommandType.Text, parameters, ct);{{end}}
+            }
+            catch (Exception ex) { throw new Exception("{{.Name}} - " + ex.Message); }
+        }
+{{end}}{{end}}    }
+}

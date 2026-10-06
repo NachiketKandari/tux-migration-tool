@@ -1,0 +1,40 @@
+{{range .Usings}}using {{.}};
+{{end}}
+namespace {{.Namespace}}
+{
+    public class {{.Service}} : I{{.Service}}
+    {
+        private readonly I{{.Repo}} _{{.RepoField}};
+        private readonly ILogger<{{.Service}}> _logger;
+        public {{.Service}}(I{{.Repo}} {{.RepoField}}Repository, ILogger<{{.Service}}> logger)
+        {
+            _{{.RepoField}} = {{.RepoField}}Repository;
+            _logger = logger;
+        }
+{{range .Endpoints}}{{ $dto := .DTOName }}{{ $action := .Name }}
+        public async Task<{{.RetType}}> {{.Name}}({{$.RequestDTO}} request, CancellationToken ct)
+        {
+            try
+            {
+{{range .Queries}}                {{.CallLHS}} = await _{{$.RepoField}}.{{.MethodName}}({{.Args}}ct);
+{{if .MapSingle}}                var row = {{.VarName}}.Rows.Count > 0 ? {{.VarName}}.Rows[0] : null;
+                var response = new {{ $dto }}
+                {
+{{range .Props}}                    {{.}} = row != null ? DataReaderHelper.GetStr(row, "{{.}}") : string.Empty,
+{{end}}                };
+                _logger.LogInformation({{.LogLine}});
+{{end}}{{if .MapMulti}}                var response = new List<{{ $dto }}>();
+                foreach (DataRow row in {{.VarName}}.Rows)
+                {
+                    response.Add(new {{ $dto }}
+                    {
+{{range .Props}}                        {{.}} = DataReaderHelper.GetStr(row, "{{.}}"),
+{{end}}                    });
+                }
+                _logger.LogInformation({{.LogLine}});
+{{end}}{{end}}{{.TodoSlot}}                return {{.ReturnExpr}};
+            }
+            catch (Exception ex) { throw new Exception("Error while executing {{ $action }} - " + ex.Message); }
+        }
+{{end}}    }
+}

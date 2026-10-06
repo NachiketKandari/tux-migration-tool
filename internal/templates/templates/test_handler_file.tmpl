@@ -1,0 +1,61 @@
+package {{.Package}}
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"{{.ControllerPkg}}"
+	"{{.LoggerPkg}}"
+	"{{.ModelsPkg}}"
+	"{{.NetworkPkg}}"
+	"{{.UtilsPkg}}"
+	"net/http"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+{{- if .HasRegisterValidations}}
+	"github.com/gin-gonic/gin/binding"
+	"github.com/go-playground/validator/v10"
+{{- end}}
+	"{{if .GomockPkg}}{{.GomockPkg}}{{else}}go.uber.org/mock{{end}}/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
+)
+
+/*
+MockGen
+{{.MockGenCmd}}
+
+Coverage
+{{.CoverageCmd}}
+*/
+
+type {{.SuiteName}} struct {
+	suite.Suite
+	ctx           context.Context
+	{{.CtrlMockVar}} *{{.CtrlMockType}}
+	{{.HandlerVar}}  {{.IfaceName}}
+}
+
+// run test | debug test
+func Test{{.SuiteName}}(t *testing.T) {
+	suite.Run(t, new({{.SuiteName}}))
+}
+
+func (suite *{{.SuiteName}}) SetupSuite() {
+	gin.SetMode(gin.TestMode)
+	logger.LoggerInit("", -1)
+
+	{{- if .HasRegisterValidations}}
+	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
+		utils.RegisterValidations(v)
+	}
+{{- end}}
+
+	suite.ctx = context.TODO()
+	suite.{{.CtrlMockVar}} = {{.MockCtor}}
+	suite.{{.HandlerVar}} = {{.CtorCall}}
+}
+{{range .Methods}}
+{{.}}
+{{end}}

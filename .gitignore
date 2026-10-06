@@ -1,0 +1,97 @@
+# runtime outputs (repo-root, per-run artifacts, never committed — anchored so
+# they cannot swallow same-named directories elsewhere in the tree)
+/conversion_logs/
+/python_out/
+/mappings/
+/scenarios/
+
+# build artifacts (anchored — the unanchored forms used to ignore the
+# whole cmd/tuxconv and cmd/xtux source trees)
+bin/
+/tuxconv
+/xtux
+
+# retired one-off harnesses (kept locally, not part of the repo)
+duel/
+/cmd/duel/
+
+# OS noise
+**/.DS_Store
+
+# Next.js viewer (web/): deps + build output never committed
+web/node_modules/
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
+# Agent/editor tooling — per-machine ids, session state, caches and
+# installed tool trees. None of it belongs in the repo: each tool
+# regenerates its own state locally, and a committed copy only turns up as
+# churn (or as a leaked local id) in every diff. Whole directories are
+# ignored, and nothing under them is tracked.
+/.commandcode/
+/.opencode/
+/.freebuff/
+/.kilo/
+/.claude/
+/.codex/
+/.cursor/
+/.gemini/
+/.aider*
+/.continue/
+/.windsurf/
+/.cline/
+/.roo/
+/.specstory/
+/.history/
+# editor state
+/.idea/
+/.vscode/
+/.zed/
+*.swp
+*.swo
+# local-only corpus + working config
+tux/
+tuxExamples/
+moreExamples/
+batchExamples/
+examples/
+# local-only pipeline data/notes (internal endpoints, runtime log, diagrams)
+/dummyPipelineTest/
+/excalidraw_notes/
+/EntireGoPipeline.excalidraw
+# local working-copy run config (literals allowed here, never commit them)
+.tuxconv.yaml
+.tuxconv.yaml.*
+.tuxconvert.yaml
+.tuxconvert.yaml.*
+# legacy pre-sanitization name — still ignored so old working copies stay clean
+.tuxgo.yaml
+.tuxgo.yaml.*
+*.excalidraw
+# ...except the PRD diagram, which ships with the repo
+!prd/*.excalidraw
+
+# docs/ — working notes, design/plan records and the deck generator. Local
+# only: the plans are breadcrumbs for this checkout, and the .pptx/.pdf the
+# generator writes are regenerable artifacts.
+/docs/
+
+# local-only Comp sources, their derived goldens and run artifacts — never
+# committed. The tests that pin against them skip when they are absent.
+/test/
+/dt_cmpt/
+
+# Go test sources — local only. The suite is the tool's own regression net and
+# is expected to churn as the fixtures change; it is not part of the published
+# tree. Everything stays on disk, so `go test ./...` works as normal here.
+# NB: this drops internal/repocheck (guard_test.go was its only file), so the
+# machine-path and tracked-but-ignored guards no longer run from a fresh clone.
+*_test.go
+
+# Test fixtures and the demo corpus — Pro*C inputs, pinned IR JSON, expected
+# generator output, the gentest mini-module and its gap report, and the
+# pygentest probe scripts. All stay on disk, so `go test ./...` and the docs'
+# examples still work here; the published tree ships the tool, not demo inputs.
+/testdata/
+/internal/pygentest/testdata/
+*.test.mjs

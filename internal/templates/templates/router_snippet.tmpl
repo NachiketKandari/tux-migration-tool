@@ -1,0 +1,6 @@
+{{.Service}} := v1.Group("/{{.Service}}")
+{
+{{- range .Routes}}
+	{{$.Service}}.POST("{{.Path}}", obj.{{.Handler}})
+{{- end}}
+}

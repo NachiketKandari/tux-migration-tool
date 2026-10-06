@@ -1,0 +1,10 @@
+namespace {{.Namespace}}
+{
+    public class {{.DTOCls}}
+    {
+{{range .Endpoints}}        public class {{.DTOName}}
+        {
+{{range .Props}}            public string {{.}} { get; set; } = string.Empty;
+{{end}}        }
+{{end}}    }
+}

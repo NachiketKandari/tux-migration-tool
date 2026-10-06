@@ -1,0 +1,172 @@
+# .tuxconv.yaml — tuxconv run configuration (PRD F7, R1).
+#
+# Discovery: every command looks for ./.tuxconv.yaml in the working directory;
+# the -config <path> flag overrides it; $TUXCONV_CONFIG (the web viewer's
+# server-level pointer — job tmpdirs carry no yaml) is the next fallback;
+# with none of those, the stock defaults (internal/config Default()) apply —
+# the filename is only the default-lookup convention, any path works via
+# -config. Unknown keys are load errors, and
+# relative paths resolve against the working directory (not this file).
+# API keys are environment-variable NAMES only — never literals (R6); a
+# literal apiKey is allowed in the gitignored working copy as the local-dev
+# fallback. Absent fields/sections keep the defaults shown here.
+
+run:
+  profile: onprem-vllm        # which models[] entry generation uses (R1)
+  temperature: 0.1            # pinned for deterministic runs (Q1)
+  maxContextTokens: 16000     # VALIDATED ONLY (must be >= maxPromptTokens); no engine
+                              # reads it — dynamic mode sizes against modelContextTokens
+  maxPromptTokens: 10000      # hard per-call prompt ceiling; a prompt or projected body
+                              # over the ceilings routes the endpoint to fragments
+  maxOutputTokens: 4096       # static output ceiling; dynamic mode still caps fragment
+                              # slices at ¾ of its char equivalent
+  charsPerToken: 3            # token estimator ratio: tokens ≈ chars/ratio. Dense Pro*C
+                              # measured ~2.8 chars/token at the provider — lower for C
+  tokenPolicy: dynamic        # static | dynamic. dynamic derives each call's output room:
+                              #   min(modelContextTokens − estInput − outputReserveTokens,
+                              #       modelMaxOutputTokens)
+                              # used as max_tokens when the seam sets no override;
+                              # under 256 tokens of room fails loudly
+  modelContextTokens: 16000   # dynamic only: the served model's real context length
+  modelMaxOutputTokens: 4096  # dynamic only: the provider's per-request completion cap
+  outputReserveTokens: 1024   # dynamic only: estimator-skew headroom
+  llm: true                   # THE one AI knob: false (or -no-llm on any command)
+                              # = deterministic-only run — controllers render
+                              # best-effort bodies (marked for LLM upgrade),
+                              # everything deterministic still generates
+
+models:                       # OpenAI-compatible profiles (provider must be
+  - name: onprem-vllm         # "openai-compatible"); names must be unique
+    model: <served-model-id>  # the exact served id, e.g. qwen3-vl-30b-a3b
+    provider: openai-compatible
+    apiBase: http://vllm.internal:8002/v1
+    apiKeyEnv: VLLM_API_KEY   # env var wins; unresolved key degrades to -no-llm
+    requestOptions:
+      temperature: 0.1        # absent → run.temperature
+      maxTokens: 4096         # align with run.modelMaxOutputTokens. In static mode keep it
+                              # <= run.maxOutputTokens (output checks use run.*)
+      stream: true            # accepted; the seam's Chat call is non-streaming
+      timeout: 300s           # long 16k prompts + long bodies (stock: 120s)
+      retries: 3              # transport/5xx retries with backoff
+  - name: local-dev-openrouter # local development profile, same schema
+    provider: openai-compatible
+    model: <openrouter-model-id>   # e.g. qwen/qwen3-30b-a3b
+    apiBase: https://openrouter.ai/api/v1
+    apiKeyEnv: OPENROUTER_API_KEY
+    requestOptions:
+      timeout: 300s
+    # apiKey: <literal>        # local-only alternative to apiKeyEnv: keep it in the
+    #                          # gitignored working copy, never commit it (R6). Resolution:
+    #                          # env var first, literal fallback.
+
+retrieval:
+  enabled: false              # RESERVED — validated, no engine reads it (OQ1)
+
+elision:
+  mode: safe                  # RESERVED — "safe" | "off" validated; behavior is fixed
+
+concurrency:
+  workers: 1                  # opt-in parallel fan-out; correctness never depends on it
+
+validate:                     # gofmt → go build → go vet → go test loop (G6)
+  maxRetries: 3               # bounded retries with trimmed errors fed back
+  compile: auto               # Tier-B compile/run checks: auto (follows paths.mainGo),
+                              # always (require the target), never (skip Tier B)
+  run: false                  # smoke `go run .` after a green Tier B
+
+db:
+  withGorm: false             # false (default): plain sqlx-only store — NewXStore(db *sqlx.DB).
+                              # true: the item-example variant — NewXStore(oracle *gorm.DB, db *sqlx.DB)
+
+database:                     # OPTIONAL live-Oracle access (internal/db, database/sql).
+  driver: oracle               # database/sql driver name: oracle (go-ora, pure Go) or
+                              # godror (cgo + Oracle client libs). The driver must be
+                              # registered by your build — this repo imports none, so an
+                              # unregistered name with a DSN fails loudly (typo guard).
+  dsn: ""                     # literal DSN fallback (local-dev only, never commit).
+  dsnEnv: ORACLE_DSN          # env var NAME holding the DSN (env wins over literal).
+                              # Empty DSN + unset env = offline (valid): conversion runs
+                              # deterministic, `tuxconv dbcheck` reports disabled.
+                              # The DSN value is never logged — only its source.
+  maxOpenConns: 0             # pool sizing (0 = driver default)
+  maxIdleConns: 0
+  connMaxLifetime: 0s         # e.g. 5m; 0s = unlimited
+
+buffers:                     # FML buffer-role registry (PF-4.1): variable names → roles.
+  roles:                     # Matching is case-insensitive on the whole name or its last
+    Ibuffer: input           # `_`-segment (ptr_fml_Ibuffer → Ibuffer → input). Unknown
+    Obuffer: output          # names surface as a visible unknown-role fact, never a guess.
+    Sbuffer: send            # Register renamed/other buffer kinds (VIEW, CARRAY) here
+    Rbuffer: recv            # instead of in code.
+
+convert:                     # defaults for convert so repeat runs need no CLI arguments
+  input: ""                  # .pc/.pcf file or directory converted when the CLI passes no
+                             # positional target (e.g. tux/SVC_DEMO_LIST.pc)
+  mapping: ""                # endpoint-mapping YAML (or mapping directory) used when -mapping
+                             # is absent; when both are empty, convert looks in mappings/
+                             # and drafts one if nothing is there — review, then re-run
+  fileFilter: ""             # directory targets only: convert only the entries whose file
+                             # name contains this substring, case-insensitively — e.g. "px_"
+                             # picks up SVC_PX_*.pc (your services) and skips the rest.
+                             # Empty (default) = every entry. Helper/fn libs never need to
+                             # match (they stay in the resolution pool)
+  flowDraft: true            # feed the deterministic flow-tree draft into the controller
+                             # prompt for the LLM to enhance; false for prompt A/B runs
+  txWrap: true               # deterministically repair combined fragment bodies that fail
+                             # the transaction gate (thread tx + wrap in ExecTransaction);
+                             # repair-only and re-gated — false keeps the loud failure
+                             # (unresolved external fns need no knob: LLM mode attempts
+                             # one-shot stub synthesis per stub into controller/fnstubs.go;
+                             # -no-llm keeps every stub panicking)
+  retryRepair: false         # retry methodology A/B (also -retry-repair on convertgo):
+                             # false = a rejected attempt regenerates from the original
+                             # prompt; true = its payload rides back as an assistant turn
+                             # and the model patches it. Compare runs with
+                             # `tuxconv retrystats conversion_logs/audit/<A> <B>`
+
+batchpy:                     # batch→Python conventions (PRD-2026-09-08 BP-7)
+  input: ""                  # .pc/.pcf file or directory converted when the CLI passes no
+                             # positional target (mirrors convert.input for the Go path)
+  fileFilter: ""             # directory targets only: substring match on file names, e.g. "bat_px_"
+  wrapperModule: core.db_router   # the generated import of the db-router wrapper
+  routerClass: DatabaseRouter     # the wrapper class + DbMode modes below
+  readMode: DbMode.READ           # connection mode for SELECTs
+  writeMode: DbMode.WRITE         # connection mode for DML
+  loggerPrefix: "app."            # logger name = prefix + <service_name>
+  entrypoint: process_daily_batch # the unified runner method the service exposes
+  shape: auto                # auto = rubric by complexity | repo = always repository
+  dmlLoop: batch             # batch = fetchall + chunked executemany | rowbyrow = per-row execute
+  chunkSize: 1000            # executemany chunk size (batch mode)
+  outDir: python_out         # default output directory for generated modules
+
+convertcs:                   # .NET Core target defaults (flag > config > default)
+  input: ""                  # .pc/.pcf file converted when the CLI passes none
+  mapping: ""                # mapping used when -mapping is absent
+  out: ""                    # output root for the component tree (fallback: paths.staged)
+  noLLM: false               # deterministic-only kill switch (-no-llm ORs on top)
+  namespace: ""              # draft-time root namespace (empty keeps the TODO placeholder)
+  area: ""                   # draft-time dotted area, e.g. AcmeApplication.CustomerAuthenticate
+
+templates:                   # user template overlay (also -templates <dir> on
+  dir: ""                    # convertgo/convertbatchpy/convertcs/gentest)
+                             # Dir of <template_id>.tmpl files overriding the embedded set;
+                             # ids without a file keep the embedded default. Start with
+                             # `tuxconv templates dump -out templates`, edit, then
+                             # `tuxconv templates verify -dir templates`; a bad dir/unknown
+                             # id/unparseable override fails the run. `templates list` shows
+                             # each id's origin (file vs embedded).
+
+paths:
+  target: ../existing-go-service # RESERVED — no engine reads it (kept so existing
+                             # configs load; Tier-B anchors on mainGo)
+  mainGo: ""                 # a file inside the target Go module (e.g. <target>/main.go):
+                             # the Tier-B anchor — validation walks up to its go.mod.
+                             # Empty = target absent on this machine; conversion stages
+                             # under paths.staged and validates syntax-only
+  ledger: conversion_logs/ledger   # unit status + source→target conversion map (§4.6)
+  state: conversion_logs/state     # IR cache, re-indexed on mtime (Phase 2)
+  staged: conversion_logs/_staged  # generated-code staging when paths.mainGo is empty
+
+# Logs and audit are NOT configurable — `conversion_logs/logs/` and
+# `conversion_logs/audit/` are fixed conventions (move logs with the global
+# `-log-dir` flag). Everything the tool writes lands under `conversion_logs/`.

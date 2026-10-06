@@ -1,0 +1,23 @@
+package {{.Package}}
+
+import (
+	"context"
+	"{{.DBPkg}}"
+	"{{.ModelsPkg}}"
+)
+
+type {{.StructName}} struct {
+	store {{.StoreIface}}
+}
+
+type {{.IfaceName}} interface {
+{{- range .Methods}}
+	{{.}}
+{{- end}}
+}
+
+func {{.CtorName}}(store {{.StoreIface}}) {{.IfaceName}} {
+	return &{{.StructName}}{
+		store: store,
+	}
+}

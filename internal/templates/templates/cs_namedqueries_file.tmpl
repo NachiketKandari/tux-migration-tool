@@ -1,0 +1,8 @@
+namespace {{.Namespace}}
+{
+    public class {{.QueriesCls}}
+    {
+{{range .Queries}}        public const string {{.Name}} = @"
+{{.SQL}}";
+{{end}}    }
+}

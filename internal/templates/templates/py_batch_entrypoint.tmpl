@@ -1,0 +1,18 @@
+    def {{.Entrypoint}}(self, workers: int = 1) -> Dict[str, Any]:
+        """Unified runner entry point orchestrating all phases."""
+        logger.info("Invoking {{.ServiceName}} via unified runner with %d workers.", workers)
+        logger.info("****** {{.ServiceName}} - starting ******")
+        try:
+{{- range .Calls}}
+            {{.Key}} = self.{{.Method}}()
+{{- end}}
+            logger.info("****** {{.ServiceName}} - exiting ******")
+            return {
+                "status": "SUCCESS",
+{{- range .Calls}}
+                "{{.Key}}": {{.Key}},
+{{- end}}
+            }
+        except Exception as ex:
+            logger.error("Application error caught during batch sequence: %s", ex)
+            raise

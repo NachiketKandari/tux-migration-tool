@@ -1,0 +1,15 @@
+func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context, tx *sqlx.Tx{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{.Return}}, error) {
+
+	var {{.VarName}} {{.ScanType}}
+
+	query := `{{.Query}}`
+
+	err := tx.GetContext({{.CtxName}}, &{{.VarName}}, query, {{.ArgList}})
+	if err != nil {
+		logger.Log({{.CtxName}}).Error("Error executing query", zap.Error(err))
+		return {{.Zero}}, err
+	}
+
+	logger.Log({{.CtxName}}).Debug("Result:", zap.Any("result:", {{.Extract}}))
+	return {{.Extract}}, nil
+}

@@ -1,0 +1,279 @@
+"""_pygentest_sqlrules — the Tier-1 SQL well-formedness rules (pygentest plan §1a).
+
+Five rules, one closed vocabulary, no dependencies beyond `re`. They are the
+answer to the plan's finding F1: the pipeline reports `0 sql deviations` for a
+statement Oracle cannot execute, because `sqlchk`'s normalizer strips
+`INTO :a, :b` from BOTH sides before comparing — so a dead INSERT and a fixed
+one score identically. These rules read the SQL text of the emitted module and
+judge it as SQL, so the INTO clause is not a tolerance.
+
+    R1 returning_into        a RETURNING clause must name an INTO target
+    R2 binds_declared        placeholders == the bind set the emitter declared
+    R3 predicates_bound      a DML WHERE must bind its predicate columns
+    R4 row_shape             a SELECT projects the row shape the plan declares
+    R5 closed_shape          balanced text, known leading verb, no placeholders
+
+Each rule returns findings, never exceptions: a statement it cannot decide is
+reported as SKIPPED rather than failed, because a noisy oracle is worse than no
+oracle. `check()` is the entry point the generated suite calls per constant;
+`RULES` states the contract in the emitted artifact so a reader does not have
+to open this file to know what was asserted.
+
+G5 ports these rules to Go so the pipeline gate and the C#/Go emitters share
+them; the two implementations are pinned to agree by a parity test.
+"""
+import re
+
+# The verbs a batch statement may open with. A statement outside this set is
+# reported, not silently accepted (R5): the plan calls for a closed grammar.
+VERBS = frozenset([
+    "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE",
+])
+
+# Clause keywords that end a clause at paren-depth 0.
+CLAUSE_END = frozenset([
+    "WHERE", "SET", "VALUES", "RETURNING", "GROUP", "ORDER", "HAVING",
+    "CONNECT", "START", "UNION", "INTERSECT", "MINUS", "ON", "USING",
+])
+
+_TOKEN = re.compile(
+    r"""(?P<comment>--[^\n]*|/\*.*?\*/)
+      | (?P<string>'(?:[^']|'')*')
+      | (?P<bind>:[ \t]*[A-Za-z_][A-Za-z0-9_]*)
+      | (?P<word>[A-Za-z_][A-Za-z0-9_$#]*)
+      | (?P<num>[0-9]+(?:\.[0-9]+)?)
+      | (?P<punct>[(),;.*=<>!+\-/:|]|\|\||>=|<=|<>|!=)
+      | (?P<space>\s+)""",
+    re.VERBOSE | re.DOTALL)
+
+RULES = (
+    ("R1", "returning_into", "a RETURNING clause must name an INTO target"),
+    ("R2", "binds_declared", "placeholders equal the declared bind set"),
+    ("R3", "predicates_bound", "a DML WHERE binds its predicate columns"),
+    ("R4", "row_shape", "a SELECT projects the declared row shape"),
+    ("R5", "closed_shape", "balanced text, known verb, no unbound placeholders"),
+)
+
+
+def tokens(sql):
+    """(kind, text) per token; comments are dropped, strings kept verbatim.
+
+    Pro*C's spaced bind spelling (`: name`) tokenizes as one bind token, so
+    the name compares whatever the spacing was.
+    """
+    out = []
+    for m in _TOKEN.finditer(sql):
+        kind = m.lastgroup
+        if kind in ("comment", "space"):
+            continue
+        out.append((kind, m.group()))
+    return out
+
+
+def bind_name(text):
+    """`name` from a bind token's text (": name" and ":name" alike)."""
+    return text.split(":", 1)[1].strip()
+
+
+def placeholders(sql):
+    """Every bind name in the statement, in textual order, repeats included."""
+    return [bind_name(t) for k, t in tokens(sql) if k == "bind"]
+
+
+def _clause(toks, keyword):
+    """The tokens of `keyword`'s clause at paren-depth 0, up to the next
+    clause keyword. None when the statement has no such clause."""
+    depth = 0
+    start = None
+    for i, (kind, text) in enumerate(toks):
+        if kind == "punct" and text == "(":
+            depth += 1
+        elif kind == "punct" and text == ")":
+            depth -= 1
+        elif depth == 0 and kind == "word" and text.upper() == keyword:
+            start = i + 1
+            break
+    if start is None:
+        return None
+    depth = 0
+    end = len(toks)
+    for j in range(start, len(toks)):
+        kind, text = toks[j]
+        if kind == "punct" and text == "(":
+            depth += 1
+        elif kind == "punct" and text == ")":
+            depth -= 1
+        elif depth == 0 and kind == "word" and text.upper() in CLAUSE_END:
+            end = j
+            break
+    return toks[start:end]
+
+
+def _conjuncts(toks):
+    """Split a clause on its top-level AND/OR."""
+    parts, cur, depth = [], [], 0
+    for kind, text in toks:
+        if kind == "punct" and text == "(":
+            depth += 1
+        elif kind == "punct" and text == ")":
+            depth -= 1
+        if depth == 0 and kind == "word" and text.upper() in ("AND", "OR"):
+            parts.append(cur)
+            cur = []
+            continue
+        cur.append((kind, text))
+    parts.append(cur)
+    return [p for p in parts if p]
+
+
+def verb(sql):
+    """The statement's leading keyword, uppercased ("" when there is none)."""
+    for kind, text in tokens(sql):
+        if kind in ("word", "punct"):
+            return text.upper()
+    return ""
+
+
+def projections(sql):
+    """(count, decidable) — top-level projection count of a SELECT.
+
+    Not decidable when the projection holds `*`, DISTINCT, or a subquery: the
+    column count is then not the row shape, and guessing would be a false
+    finding rather than a true one.
+    """
+    toks = tokens(sql)
+    if len(toks) < 2 or toks[0][0] != "word" or toks[0][1].upper() != "SELECT":
+        return None, False
+    depth, count, decided = 0, 1, True
+    for kind, text in toks[1:]:
+        if kind == "punct" and text == "(":
+            depth += 1
+        elif kind == "punct" and text == ")":
+            depth -= 1
+        elif depth == 0 and kind == "word" and text.upper() == "FROM":
+            return count, decided
+        elif depth == 0 and kind == "punct" and text == ",":
+            count += 1
+        elif depth == 0 and kind == "word" and text.upper() in ("SELECT", "DISTINCT"):
+            decided = False
+        elif depth == 0 and kind == "punct" and text == "*":
+            decided = False
+    return None, False
+
+
+def returning_targets(sql):
+    """(present, target_bind_names) for the statement's RETURNING clause."""
+    toks = tokens(sql)
+    for i, (kind, text) in enumerate(toks):
+        if kind == "word" and text.upper() == "RETURNING":
+            return True, [bind_name(t) for k, t in toks[i + 1:] if k == "bind"]
+    return False, []
+
+
+def unbound_predicates(sql):
+    """[(column, right-hand side)] for a top-level `COL = <literal>` conjunct.
+
+    The plan's "a DML with a WHERE must bind every predicate column". Only a
+    literal right-hand side is decidable: a bind is bound, and a function or
+    column (`>= TRUNC(SYSDATE)`, `a.b = c.d`) is not a bare literal and is left
+    to the other rules.
+    """
+    where = _clause(tokens(sql), "WHERE")
+    if where is None:
+        return []
+    bad = []
+    for conj in _conjuncts(where):
+        depth = 0
+        for i, (kind, text) in enumerate(conj):
+            if kind == "punct" and text == "(":
+                depth += 1
+            elif kind == "punct" and text == ")":
+                depth -= 1
+            elif depth != 0 or kind != "punct" or text != "=":
+                continue
+            left = conj[:i]
+            if len(left) != 1 or left[0][0] != "word":
+                continue
+            right = conj[i + 1:]
+            if any(k == "bind" for k, _ in right):
+                continue
+            if not right:
+                bad.append((left[0][1], "nothing"))
+            elif right[0][0] in ("string", "num"):
+                bad.append((left[0][1], right[0][1]))
+    return bad
+
+
+_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+
+
+def _unbalanced(sql):
+    """(parentheses, quotes) deficit — both must be zero for the text to be
+    a complete statement (an unterminated string is a truncated emit).
+
+    Comments are stripped first: a quoted apostrophe inside a `--` note is
+    prose, not a broken literal.
+    """
+    toks = tokens(sql)
+    depth = 0
+    for kind, text in toks:
+        if kind == "punct" and text == "(":
+            depth += 1
+        elif kind == "punct" and text == ")":
+            depth -= 1
+    return abs(depth), _COMMENT.sub(" ", sql).count("'") % 2
+
+
+def check(sql, kind="", declared_binds=None, row_shape=0):
+    """Findings for one statement: [(rule_id, message)].
+
+    `declared_binds` is the bind set the emitter's plan recorded for the
+    constant (R2 compares it with the SQL's own placeholders), and `row_shape`
+    the row tuple the plan declares for it (R4; 0 = not declared, R4 skipped).
+    """
+    findings = []
+    if not sql or not sql.strip():
+        return [("R5", "the constant is empty")]
+
+    parens, quote = _unbalanced(sql)
+    if parens:
+        findings.append(("R5", "%d unclosed parenthesis/parentheses" % parens))
+    if quote:
+        findings.append(("R5", "unterminated string literal"))
+    head = verb(sql)
+    if head not in VERBS:
+        findings.append(("R5", "opens with %r, not one of %s"
+                         % (head, ", ".join(sorted(VERBS)))))
+    # A colon the tokenizer could not read as a bind. Token-based, not a regex
+    # over the raw text: a time literal ('HH24:MI:SS') is inside a string token
+    # and must not be reported.
+    stray = sum(1 for kind, text in tokens(sql) if kind == "punct" and text == ":")
+    if stray:
+        findings.append(("R5", "%d colon(s) with no bind name" % stray))
+
+    has_returning, targets = returning_targets(sql)
+    if has_returning and not targets:
+        findings.append(("R1", "RETURNING names no INTO target — Oracle "
+                               "rejects the statement at execute time"))
+
+    found = placeholders(sql)
+    if declared_binds is not None:
+        declared = sorted(set(declared_binds))
+        actual = sorted(set(found))
+        if declared != actual:
+            findings.append(("R2", "binds %s but the SQL placeholders %s"
+                             % (declared or "nothing", actual or "nothing")))
+
+    if head in ("UPDATE", "DELETE", "MERGE"):
+        for column, rhs in unbound_predicates(sql):
+            findings.append(("R3", "predicate column %s is compared to %s, "
+                                   "not to a bind" % (column, rhs)))
+
+    if row_shape:
+        count, decided = projections(sql)
+        if not decided or count is None:
+            findings.append(("SKIP", "R4 projection count not decidable"))
+        elif count != row_shape:
+            findings.append(("R4", "projects %d column(s), the declared row "
+                                   "shape has %d" % (count, row_shape)))
+    return findings

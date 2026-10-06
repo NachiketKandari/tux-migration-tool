@@ -1,0 +1,30 @@
+package {{.Package}}
+
+import (
+	"{{.Module}}/pkg/repo"
+	"{{.Module}}/pkg/services/{{.Service}}/controller"
+	"{{.Module}}/pkg/services/{{.Service}}/db"
+
+	"github.com/gin-gonic/gin"
+)
+
+type {{.StructName}} struct {
+	controller controller.{{.ControllerIface}}
+}
+
+type {{.IfaceName}} interface {
+{{- range .Methods}}
+	{{.}}(c *gin.Context)
+{{- end}}
+}
+
+func {{.CtorName}}(controller controller.{{.ControllerIface}}) {{.IfaceName}} {
+	return &{{.StructName}}{
+		controller: controller,
+	}
+}
+
+func {{.WiringFnName}}(repo repo.DataObject) controller.{{.ControllerIface}} {
+	store := db.{{.StoreCtor}}({{.ReadDBArgList}})
+	return controller.{{.ControllerCtor}}(store)
+}

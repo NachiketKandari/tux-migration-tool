@@ -1,0 +1,9 @@
+{{range .Usings}}using {{.}};
+{{end}}
+namespace {{.Namespace}}
+{
+    public interface I{{.Service}}
+    {
+{{range .Endpoints}}        Task<{{.RetType}}> {{.Name}}({{$.RequestDTO}} request, CancellationToken cancellationToken);
+{{end}}    }
+}

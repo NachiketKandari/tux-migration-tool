@@ -1,0 +1,14 @@
+package {{.Package}}
+
+{{- if .HasNullTypes}}
+
+import "database/sql"
+{{- end}}
+{{- range .Structs}}
+
+type {{.Name}} struct {
+{{- range .Fields}}
+	{{.Name}} {{.Type}} `{{.Tag}}`
+{{- end}}
+}
+{{- end}}

@@ -1,0 +1,26 @@
+{{- if .Doc}}{{.Doc}}
+{{- end}}
+func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{.ReturnType}}, error) {
+	logger.Log({{.CtxName}}).Debug("DATABASE-START")
+	defer logger.Log({{.CtxName}}).Debug("DATABASE-END")
+
+	var {{.VarName}} {{if .RowType}}{{.RowType}}{{else}}{{.Scalar}}{{end}}
+
+	query := `{{.Query}}`
+
+	err := {{.Receiver}}.db.GetContext({{.CtxName}}, &{{.VarName}}, query{{if .ArgList}}, {{.ArgList}}{{end}})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		logger.Log({{.CtxName}}).Error("Error: ", zap.Any("err: ", err))
+	{{- if .RowType}}
+		return nil, err
+	{{- else}}
+		return {{if eq .Scalar "int64"}}0{{else}}""{{end}}, err
+	{{- end}}
+	}
+
+{{- if .RowType}}
+	return &{{.VarName}}, nil
+{{- else}}
+	return {{.VarName}}, nil
+{{- end}}
+}

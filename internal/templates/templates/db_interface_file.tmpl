@@ -1,0 +1,28 @@
+package {{.Package}}
+
+import (
+	"context"
+	"{{.ModelsPkg}}"
+{{- range .ExtraImports}}
+	{{.}}
+{{- end}}
+
+	"github.com/jmoiron/sqlx"
+{{- if .WithGorm}}
+	"gorm.io/gorm"
+{{- end}}
+)
+
+type {{.StoreType}} struct {
+{{.DBFieldDecls}}
+}
+
+type {{.IfaceName}} interface {
+{{- range .Methods}}
+	{{.}}
+{{- end}}
+}
+
+func {{.CtorName}}({{.DBParams}}) {{.IfaceName}} {
+	return &{{.StoreType}}{ {{.DBFields}} }
+}

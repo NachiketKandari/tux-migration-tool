@@ -1,0 +1,20 @@
+{{- if .Doc}}{{.Doc}}
+{{- end}}
+func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{.ReturnType}}, error) {
+	logger.Log({{.CtxName}}).Debug("START")
+	defer logger.Log({{.CtxName}}).Debug("END")
+
+	var {{.VarName}} []*{{.RowType}}
+
+	query := `{{.Query}}`
+
+	logger.Log({{.CtxName}}).Debug("Query:", zap.Any("query", query))
+
+	err := {{.Receiver}}.db.SelectContext({{.CtxName}}, &{{.VarName}}, query{{if .ArgList}}, {{.ArgList}}{{end}})
+	if err != nil {
+		logger.Log({{.CtxName}}).Debug(fmt.Sprintf("err: %s", err))
+		return nil, err
+	}
+
+	return {{.VarName}}, nil
+}

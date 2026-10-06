@@ -1,0 +1,18 @@
+func ({{.Receiver}} *{{.StructName}}) {{.Name}}({{.CtxName}} context.Context, request *{{.RequestType}}) (*{{.ResponseType}}, error) {
+	logger.Log({{.CtxName}}).Debug("START")
+	defer logger.Log({{.CtxName}}).Debug("END")
+
+{{.PreFlow}}
+
+	err = utils.ExecTransaction({{.CtxName}}, {{.Receiver}}.store.GetDB(), func(tx *sqlx.Tx) error {
+
+{{.TxBody}}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+{{.PostFlow}}
+}

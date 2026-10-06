@@ -1,0 +1,379 @@
+"""_pygentest_harness — the stdlib-only execution harness for generated batchpy modules.
+
+This is the test half of the db-router contract (docs/pygentest-plan.md §4
+Phase 2b). `{{.RouterClass}}` and `{{.ModeClass}}` below carry the same names and
+the same members as the production `core/db_router.py`; both halves are rendered
+from the one contract, and a compile-check compares the two loaded surfaces, so
+the fake cannot drift from the code it stands in for.
+
+A suite uses four things:
+
+    import sys
+    from _pygentest_harness import Suite, {{.RouterClass}}, {{.ModeClass}}, load, normalise
+
+    M = load("bat_px_mkr_chkr.py")               # import by path, fakes injected
+    router = {{.RouterClass}}(pending=[row])     # rows served to SELECTs, FIFO
+    repo = M.BatPxMkrChkrRepository(router)      # the real generated code runs
+    suite = Suite("bat_px_mkr_chkr")
+    ...
+    sys.exit(suite.finish())
+
+The recorder lives on the router, and is what assertions compare:
+
+  - log:      (txn_id, normalised_sql, binds) for every attempted execute
+  - txn_ends: (txn_id, had_exception) for every get_connection() block
+  - commits / rollbacks: the txn ids the transaction context manager ended
+  - modes:    txn_id -> the mode get_connection() was called with
+
+One get_connection() block is one transaction, exactly as in production: a
+clean WRITE exit commits, an exception rolls back and re-raises. No oracledb
+and no database are involved — install() shadows both in sys.modules before
+the module under test is imported, and this module imports nothing outside the
+standard library on purpose (the harness is the only dependency a suite has).
+"""
+import importlib.util
+import json
+import os
+import re
+import sys
+import types
+from contextlib import contextmanager
+from enum import Enum
+
+
+class DatabaseError(Exception):
+    """Stands in for oracledb.DatabaseError, and is what fail_on injects."""
+
+
+class _BindVar:
+    """Stands in for a cursor.var() bind variable (RETURNING INTO targets)."""
+
+    def __init__(self, value=None):
+        self._value = value
+
+    def setvalue(self, value):
+        self._value = value
+
+    def getvalue(self):
+        return self._value
+
+
+def _binds_of(binds):
+    """The bind values of either a named or a positional bind list."""
+    if binds is None:
+        return []
+    if isinstance(binds, dict):
+        return list(binds.values())
+    return list(binds)
+
+
+class _Cursor:
+    """A recording stand-in for an oracledb cursor.
+
+    SELECT statements are served from the router's `pending` queue: each queue
+    entry answers one SELECT, a plain tuple as one row and a list as the rows
+    fetchall sees. DML answers `rowcount`. A statement whose SQL contains
+    RETURNING fills every var() bind with the router's `rowid`, the way the
+    driver would on a real connection.
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.router = conn.router
+        self._rows = []
+        self._rowid = None
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    @property
+    def rowid(self):
+        return self._rowid
+
+    def var(self, typecode=None, size=None):
+        """A bind variable, as oracledb creates for RETURNING INTO targets."""
+        return _BindVar()
+
+    def execute(self, sql, binds=None):
+        statement = normalise(sql)
+        self.router.log.append((self.conn.txn, statement, binds))
+        if self.router._should_fail(statement, binds):
+            raise DatabaseError("pygentest harness: injected failure for " + statement)
+        if statement.upper().startswith("SELECT"):
+            self._rows = self.router._take_rows()
+            self.rowcount = len(self._rows)
+        else:
+            self.rowcount = self.router.default_rowcount
+        if "RETURNING" in statement.upper():
+            self._rowid = self.router.rowid
+            for bind in _binds_of(binds):
+                if isinstance(bind, _BindVar):
+                    bind.setvalue(self.router.rowid)
+        return self
+
+    def executemany(self, sql, seq_of_binds):
+        statement = normalise(sql)
+        self.router.log.append((self.conn.txn, statement, list(seq_of_binds)))
+        if self.router._should_fail(statement, seq_of_binds):
+            raise DatabaseError("pygentest harness: injected failure for " + statement)
+        self.rowcount = len(seq_of_binds)
+        return self
+
+    def fetchone(self):
+        return self._rows.pop(0) if self._rows else None
+
+    def fetchall(self):
+        rows, self._rows = self._rows, []
+        return rows
+
+    def fetchmany(self, size=1):
+        rows, self._rows = self._rows[:size], self._rows[size:]
+        return rows
+
+    def __iter__(self):
+        """A real oracledb cursor is iterable, and the emitter's
+        SELECT_MULTI repository method relies on it (`for row in cur`). It
+        drains, exactly as fetchall() would — so a generator method holds its
+        transaction open until the rows are exhausted, as it does live.
+        """
+        while self._rows:
+            yield self._rows.pop(0)
+
+    def close(self):
+        self._rows = []
+
+
+class _Connection:
+    """One borrowed connection = one transaction.
+
+    commit() and rollback() are the recorder's single points: the
+    get_connection() context manager calls them on the way out, and a body
+    that calls them itself is recorded just the same — an explicit commit is
+    a fact the suite can assert on, not something to swallow.
+    """
+
+    def __init__(self, router, txn, mode):
+        self.router = router
+        self.txn = txn
+        self.mode = mode
+
+    def cursor(self):
+        return _Cursor(self)
+
+    def commit(self):
+        self.router.commits.append(self.txn)
+
+    def rollback(self):
+        self.router.rollbacks.append(self.txn)
+
+    def close(self):
+        pass
+
+
+class {{.ModeClass}}(Enum):
+    """Connection intent, mirroring the production enum member-for-member."""
+
+{{- range $m := .ModeMembers}}
+    {{$m}} = "{{$m}}"
+{{- end}}
+
+
+class {{.RouterClass}}:
+    """The recording fake of the production router: one block, one transaction.
+
+    `pending` is the FIFO of SELECT results (see _Cursor). `fail_on` is a
+    substring or a callable(statement, binds), and a matching statement raises
+    DatabaseError from execute — the injection point for failure-path tests.
+    `rowid` is what RETURNING binds receive; `rowcount` answers DML.
+    """
+
+    def __init__(self, pending=(), rowid="AAAPecAAEAAAACHAAA", fail_on=None, rowcount=1):
+        self.pending = list(pending)
+        self.rowid = rowid
+        self.fail_on = fail_on
+        self.default_rowcount = rowcount
+        self.log = []
+        self.txn_ends = []
+        self.commits = []
+        self.rollbacks = []
+        self.modes = {}
+        self._n = 0
+
+    @contextmanager
+    def get_connection(self, mode=None):
+        self._n += 1
+        txn = self._n
+        conn = _Connection(self, txn, mode)
+        self.modes[txn] = mode
+        try:
+            yield conn
+        except Exception:
+            if mode == {{.WriteModeExpr}}:
+                conn.rollback()
+            self.txn_ends.append((txn, True))
+            raise
+        else:
+            if mode == {{.WriteModeExpr}}:
+                conn.commit()
+            self.txn_ends.append((txn, False))
+
+    def txs(self):
+        """txn_id -> [normalised statements], in execution order."""
+        out = {}
+        for txn, statement, _ in self.log:
+            out.setdefault(txn, []).append(statement)
+        return out
+
+    def sqls(self):
+        """Every normalised statement executed, in order."""
+        return [statement for _, statement, _ in self.log]
+
+    def _take_rows(self):
+        if not self.pending:
+            return []
+        item = self.pending.pop(0)
+        return list(item) if isinstance(item, list) else [item]
+
+    def _should_fail(self, statement, binds):
+        if self.fail_on is None:
+            return False
+        if callable(self.fail_on):
+            return bool(self.fail_on(statement, binds))
+        return self.fail_on in statement
+
+
+def normalise(sql):
+    """Whitespace-collapse a statement the way every assertion compares it."""
+    return re.sub(r"\s+", " ", sql).strip()
+
+
+def _unmodelled_driver_name(name):
+    raise AttributeError(
+        "pygentest harness: oracledb." + name + " is not modelled — add it to "
+        "install() if the generated code needs it")
+
+
+def install():
+    """Shadow `oracledb` and `core.db_router` in sys.modules with the fakes.
+
+    Deterministic on purpose: the harness always installs its own stubs, so a
+    suite cannot accidentally talk to a real driver or to the production
+    router file on sys.path. Returns the oracledb stub.
+    """
+    oracledb = types.ModuleType("oracledb")
+    oracledb.__doc__ = "pygentest harness stub for python-oracledb"
+    oracledb.DatabaseError = DatabaseError
+    oracledb.Cursor = _Cursor
+    oracledb.STRING = "STRING"
+    oracledb.NUMBER = "NUMBER"
+    oracledb.DATE = "DATE"
+    oracledb.TIMESTAMP = "TIMESTAMP"
+    oracledb.__getattr__ = _unmodelled_driver_name
+    sys.modules["oracledb"] = oracledb
+
+    core = types.ModuleType("core")
+    db_router = types.ModuleType("core.db_router")
+    db_router.__doc__ = "pygentest harness fake for the production db-router contract"
+    db_router.{{.RouterClass}} = {{.RouterClass}}
+    db_router.{{.ModeClass}} = {{.ModeClass}}
+    core.db_router = db_router
+    sys.modules["core"] = core
+    sys.modules["core.db_router"] = db_router
+    return oracledb
+
+
+def load(path, name=None):
+    """Import a generated module by file path, with the fakes installed.
+
+    The module lands in sys.modules under its own stem (or `name`) before it
+    executes, so nested imports and repr() behave like a normal import. Call
+    this instead of `import <module>`: it is the only path that installs the
+    fakes first, and importing the production core.db_router before it would
+    require a live driver.
+    """
+    install()
+    path = os.path.abspath(path)
+    if name is None:
+        name = os.path.splitext(os.path.basename(path))[0]
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("pygentest harness: cannot load " + path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Suite:
+    """The minimal stdlib-only check runner the generated suites exit through.
+
+    A suite that does not finish() and sys.exit() its code is not a gate; the
+    pygentest command runs it with python3 and fails the build on a non-zero
+    exit (the plan's guard against golden-stamping: the suite must execute).
+
+    `skip` exists so a claim the suite cannot decide today is REPORTED rather
+    than passed over: a skipped check prints, is counted, and never becomes a
+    green tick. `extra` is the machine read-out the command parses off the
+    PYGENTEST-RESULT line (findings, tier counts).
+    """
+
+    def __init__(self, name="pygentest"):
+        self.name = name
+        self.passed = []
+        self.failed = []
+        self.skipped = []
+        self.extra = {}
+
+    def section(self, title):
+        print("\n=== %s ===" % title)
+
+    def check(self, label, condition, detail=""):
+        if condition:
+            self.passed.append(label)
+            print("  [PASS] %s" % label)
+        else:
+            self.failed.append(label)
+            print("  [FAIL] %s%s" % (label, "  (%s)" % detail if detail else ""))
+        return bool(condition)
+
+    def eq(self, label, got, want):
+        return self.check(label, got == want, "got %r, want %r" % (got, want))
+
+    def skip(self, label, why):
+        """Record an assertion the suite cannot decide — never a pass."""
+        self.skipped.append(label)
+        print("  [SKIP] %s  (%s)" % (label, why))
+        return False
+
+    def result(self):
+        """The machine read-out: one JSON object on one line."""
+        payload = {
+            "suite": self.name,
+            "checks": len(self.passed) + len(self.failed),
+            "passed": len(self.passed),
+            "failed": len(self.failed),
+            "skipped": len(self.skipped),
+            "failed_checks": self.failed,
+        }
+        payload.update(self.extra)
+        return json.dumps(payload, sort_keys=True)
+
+    def finish(self):
+        total = len(self.passed) + len(self.failed)
+        print("\n%s: %d checks, %d passed, %d failed, %d skipped"
+              % (self.name, total, len(self.passed), len(self.failed),
+                 len(self.skipped)))
+        if self.skipped:
+            print("NOT ASSERTED (a claim this suite could not decide):")
+            for label in self.skipped:
+                print("  ~ %s" % label)
+        if self.failed:
+            print("FAILED:")
+            for label in self.failed:
+                print("  - %s" % label)
+        print("PYGENTEST-RESULT " + self.result())
+        return 1 if self.failed else 0

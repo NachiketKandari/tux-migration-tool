@@ -1,0 +1,38 @@
+using Asp.Versioning;
+using Microsoft.AspNetCore.Mvc;
+{{range .Usings}}using {{.}};
+{{end}}
+namespace {{.Namespace}}
+{
+    [ApiController]
+    [ApiVersion("{{.ApiVersion}}")]
+    [Route("api/v{version:apiVersion}/[controller]")]
+    public class {{.Controller}} : ControllerBase
+    {
+        private readonly I{{.Service}} _{{.ServiceField}};
+        private readonly ILogger<{{.Controller}}> _logger;
+        public {{.Controller}}(ILogger<{{.Controller}}> logger, I{{.Service}} {{.ServiceField}}Service)
+        {
+            _logger = logger;
+            _{{.ServiceField}} = {{.ServiceField}}Service;
+        }
+{{range .Endpoints}}
+        [HttpPost]
+        [Route("{{.Route}}")]
+        public async Task<IActionResult> {{.Name}}([FromBody] {{$.RequestDTO}} request, CancellationToken cancellationToken)
+        {
+{{if $.Validator}}            var validation = new {{$.Validator}}Validator("{{$.Validator}}").Validate(request);
+            if (!validation.IsValid)
+            {
+                var error = validation.Errors[0].ErrorMessage;
+                return Ok(ResponseHelper.Error(HttpStatusCode.BadRequest, error));
+            }
+{{end}}            try
+            {
+                var result = await _{{$.ServiceField}}.{{.Name}}(request, cancellationToken);
+                return Ok(ResponseHelper.Success(result));
+            }
+            catch (Exception ex) { return Ok(ResponseHelper.Error(HttpStatusCode.InternalServerError, ex.Message)); }
+        }
+{{end}}    }
+}
