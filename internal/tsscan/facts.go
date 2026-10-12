@@ -33,13 +33,19 @@ const (
 	SQLRollback
 	SQLConnect
 	SQLOther
+	// SQLOpenCursorFor is the EXECUTE-wrapped cursor: a declare and an open
+	// fused into one embedded block, so the cursor's SELECT rides along with
+	// the open instead of standing as its own DECLARE. It is appended last so
+	// the pinned numeric values above never shift.
+	SQLOpenCursorFor
 )
 
 // IsQuery reports whether the kind is a logical database query (the SELECT,
 // DECLARE CURSOR and DML families; cursor choreography and plumbing are not).
 func (k SQLKind) IsQuery() bool {
 	switch k {
-	case SQLSelect, SQLDeclareCursor, SQLInsert, SQLUpdate, SQLDelete, SQLMerge:
+	case SQLSelect, SQLDeclareCursor, SQLInsert, SQLUpdate, SQLDelete, SQLMerge,
+		SQLOpenCursorFor:
 		return true
 	}
 	return false
@@ -78,6 +84,8 @@ func (k SQLKind) String() string {
 		return "CONNECT"
 	case SQLOther:
 		return "OTHER"
+	case SQLOpenCursorFor:
+		return "OPEN_CURSOR_FOR"
 	}
 	return "UNKNOWN"
 }

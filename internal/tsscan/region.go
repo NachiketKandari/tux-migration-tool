@@ -126,6 +126,9 @@ func classifySQL(norm string) (SQLKind, string) {
 	if len(fields) == 0 {
 		return SQLOther, ""
 	}
+	if name, ok := embeddedCursorOpen(fields); ok {
+		return SQLOpenCursorFor, name
+	}
 	switch fields[0] {
 	case "SELECT":
 		return SQLSelect, ""
@@ -154,8 +157,7 @@ func classifySQL(norm string) (SQLKind, string) {
 			return SQLDeclareCursor, fields[1]
 		}
 	case "OPEN", "FETCH", "CLOSE":
-		if len(fields) >= 2 {
-			name := strings.TrimRight(fields[1], ";,")
+		if name := hostRefName(fields, 1); name != "" {
 			switch fields[0] {
 			case "OPEN":
 				return SQLOpen, name
@@ -167,6 +169,83 @@ func classifySQL(norm string) (SQLKind, string) {
 		}
 	}
 	return SQLOther, ""
+}
+
+// hostRefName reads the cursor host reference at token i of an uppercased,
+// whitespace-split statement. The reference spells either ":name", the
+// ": name" form reformatted sources ship (whitespace after the colon is legal
+// Pro*C), or a bare name when the cursor was declared without one — all three
+// keep the spelling their statement already used.
+func hostRefName(fields []string, i int) string {
+	if i >= len(fields) {
+		return ""
+	}
+	tok := strings.TrimRight(fields[i], ";, ")
+	if tok == ":" {
+		if i+1 >= len(fields) {
+			return ""
+		}
+		return ":" + strings.TrimRight(fields[i+1], ";, ")
+	}
+	return tok
+}
+
+// embeddedCursorOpen recognises the EXECUTE-wrapped cursor form, where the
+// declare and the open are fused into one embedded block and the cursor's
+// SELECT rides along inside it:
+//
+//	EXEC SQL EXECUTE BEGIN OPEN :c FOR SELECT ...; END; END-EXEC;
+//	EXEC SQL EXECUTE OPEN :c FOR SELECT ...; END-EXEC;
+//	EXEC SQL EXECUTE BEGIN OPEN : c FOR SELECT ...; END; END-EXEC;
+//
+// fields is the uppercased, whitespace-split statement. The name keeps its
+// leading ':' — the pinned OPEN/FETCH/CLOSE spelling — so choreography matches
+// it against the FETCH and CLOSE of the same cursor. Without this the whole
+// statement, SELECT included, fell through to SQLOther and the query was
+// dropped from the IR entirely.
+func embeddedCursorOpen(fields []string) (string, bool) {
+	i := 0
+	if i < len(fields) && fields[i] == "EXECUTE" {
+		i++
+	}
+	if i < len(fields) && fields[i] == "BEGIN" {
+		i++
+	}
+	if i >= len(fields) || fields[i] != "OPEN" {
+		return "", false
+	}
+	// The cursor reference spells either ":name" or ": name" — whitespace
+	// between the colon and the name is legal Pro*C, and reformatted sources
+	// ship it — so take the name from either slot and keep the ':' prefix.
+	name := ""
+	next := i + 1
+	switch {
+	case next < len(fields) && fields[next] == ":":
+		if next+1 >= len(fields) {
+			return "", false
+		}
+		name = ":" + fields[next+1]
+		next += 2
+	case next < len(fields):
+		name = fields[next]
+		next++
+	default:
+		return "", false
+	}
+	// ... FOR, then a query to open it over.
+	if next >= len(fields) || fields[next] != "FOR" || next+1 >= len(fields) {
+		return "", false
+	}
+	switch fields[next+1] {
+	case "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE":
+	default:
+		return "", false
+	}
+	name = strings.TrimRight(name, ";, ")
+	if name == "" || name == ":" {
+		return "", false
+	}
+	return name, true
 }
 
 // prescan walks the raw bytes once, collecting: EXEC SQL regions (with the

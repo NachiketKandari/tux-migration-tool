@@ -500,9 +500,10 @@ func (f *File) Condition(index int) *Condition {
 }
 
 // SameCursor compares cursor names case-insensitively (the scanner
-// uppercases, the IR keeps raw casing).
+// uppercases, the IR keeps raw casing) and ignores a leading ':', which the
+// pinned OPEN/FETCH/CLOSE spelling carries and a declare's name does not.
 func SameCursor(a, b string) bool {
-	return equalFold(a, b)
+	return equalFold(strings.TrimPrefix(a, ":"), strings.TrimPrefix(b, ":"))
 }
 
 // UniqueQueries returns the first unit of every DedupKey group, in IR order.

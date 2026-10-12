@@ -277,11 +277,16 @@ func mappingForEntry(dir, entryBase string) (string, error) {
 	}
 }
 
-// stemOf strips a .pc/.pcf (case-insensitive) extension; other extensions
-// ride along.
+// stemOf strips the source extension (case-insensitive) so the stem match
+// lines up with the draft convention, which names drafts after the source
+// stem: SVC_X.pc → SVC_X, SVC_X.pcf → SVC_X, and a plain C service too
+// (SVC_X.c → SVC_X). An extensionless name rides along untouched.
+//
+// Restricting this to .pc/.pcf stranded every other source shape: the draft
+// landed as <stem>.mapping.yaml while the lookup compared against the
+// unextended name, matched nothing, and the second pass re-drafted forever.
 func stemOf(name string) string {
-	ext := filepath.Ext(name)
-	if strings.EqualFold(ext, ".pc") || strings.EqualFold(ext, ".pcf") {
+	if ext := filepath.Ext(name); ext != "" {
 		return strings.TrimSuffix(name, ext)
 	}
 	return name

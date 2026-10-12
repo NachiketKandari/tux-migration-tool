@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"tux-migration-tool/internal/tsscan"
@@ -14,16 +15,21 @@ import (
 // the cursor. Duplicates stay factual via DedupKey/DuplicateOf.
 func buildQueries(facts *tsscan.SourceFacts, ops []FmlOp) []*Query {
 	fetchInto := fetchIntoByCursor(facts)
+	used := map[string]bool{}
 	var out []*Query
 	counter := 0
 	for _, s := range facts.Queries {
 		counter++
 		switch s.Kind {
 		case tsscan.SQLDeclareCursor:
-			out = append(out, cursorUnit(facts, s, fetchInto))
+			out = append(out, cursorUnit(facts, s, fetchInto, used))
+		case tsscan.SQLOpenCursorFor:
+			out = append(out, embeddedCursorUnit(facts, s, fetchInto, used))
 		case tsscan.SQLSelect:
+			used[fmt.Sprintf("q%d", counter)] = true
 			out = append(out, selectUnit(s, counter))
 		case tsscan.SQLInsert, tsscan.SQLUpdate, tsscan.SQLDelete, tsscan.SQLMerge:
+			used[fmt.Sprintf("q%d", counter)] = true
 			out = append(out, dmlUnit(s, counter))
 		default:
 			counter-- // non-query kinds never consumed a number
@@ -36,12 +42,58 @@ func buildQueries(facts *tsscan.SourceFacts, ops []FmlOp) []*Query {
 // cursorUnit flattens one cursor's choreography into a SELECT_MULTI unit
 // spanning DECLARE→last CLOSE (or the DECLARE itself when never closed —
 // ghost and half cursors flatten just the same).
-func cursorUnit(facts *tsscan.SourceFacts, s tsscan.ExecSQLStatement, fetchInto map[string][]string) *Query {
+func cursorUnit(facts *tsscan.SourceFacts, s tsscan.ExecSQLStatement, fetchInto map[string][]string, used map[string]bool) *Query {
 	rawName := cursorRawName(s.Normalized)
-	body := cursorBody(s.Normalized)
+	q := newMultiUnit(rawName, cursorBody(s.Normalized), s, used)
 
+	// A DECLARE names its cursor once and the choreography that follows is
+	// unambiguously its own, so the span runs to the cursor's last OPEN /
+	// FETCH / CLOSE — declare-only cursors end at the DECLARE.
+	for _, other := range facts.AllSQL {
+		if other.CursorName == "" || !SameCursor(other.CursorName, rawName) {
+			continue
+		}
+		if other.Kind == tsscan.SQLOpen || other.Kind == tsscan.SQLFetch || other.Kind == tsscan.SQLClose {
+			if other.EndLine > q.EndLine {
+				q.EndLine = other.EndLine
+			}
+		}
+	}
+	q.RowShape = fetchInto[cursorKey(rawName)]
+	return q
+}
+
+// embeddedCursorUnit builds the SELECT_MULTI for the EXECUTE-wrapped cursor
+// form — `EXEC SQL EXECUTE BEGIN OPEN :c FOR SELECT ...; END; END-EXEC;` —
+// where a declare and an open are fused into one block and the SELECT rides
+// along inside the open.
+//
+// Such a cursor is normally opened once per branch and fetched after the
+// branch closes, so neither the row shape nor the span can be read off the
+// statement alone: the fetch that lands in the open's own window wins, and the
+// span stops at the cursor's first close in that window rather than running
+// to the last one in the function, which by then belongs to a sibling branch.
+func embeddedCursorUnit(facts *tsscan.SourceFacts, s tsscan.ExecSQLStatement, fetchInto map[string][]string, used map[string]bool) *Query {
+	rawName, body := embeddedCursorBody(s.Normalized)
+	q := newMultiUnit(rawName, body, s, used)
+	window := cursorWindowEnd(facts, rawName, s.StartLine)
+
+	// The fetch this open actually feeds; fall back to the cursor's first
+	// fetch overall when the FETCH sits past the open's own window.
+	if into := fetchIntoAfter(facts, rawName, s.StartLine, window); len(into) > 0 {
+		q.RowShape = into
+	} else {
+		q.RowShape = fetchInto[cursorKey(rawName)]
+	}
+	q.EndLine = embeddedSpanEnd(facts, rawName, s.StartLine, window, q.EndLine)
+	return q
+}
+
+// newMultiUnit is the shared body of both cursor shapes: a flattened
+// multi-row SELECT named by its cursor.
+func newMultiUnit(rawName, body string, s tsscan.ExecSQLStatement, used map[string]bool) *Query {
 	q := &Query{
-		ID:              rawName,
+		ID:              uniqueID(rawName, used),
 		Type:            QuerySelectMulti,
 		TemplateID:      QuerySelectMulti.TemplateID(),
 		SQL:             body,
@@ -55,22 +107,91 @@ func cursorUnit(facts *tsscan.SourceFacts, s tsscan.ExecSQLStatement, fetchInto 
 	q.Tables, q.Aliases = parseTables(body, tsscan.SQLSelect)
 	q.Binds, q.BindArity = collectBinds(scanHostRefs(body, 0, len(body)))
 	q.OrderBy = parseOrderBy(body)
-	q.RowShape = fetchInto[strings.ToUpper(rawName)]
 	q.DedupKey = body
+	return q
+}
 
-	// extend the span to the cursor's last choreography statement
-	// (OPEN/FETCH/CLOSE — declare-only cursors end at the DECLARE)
-	for _, other := range facts.AllSQL {
-		if other.CursorName == "" || !SameCursor(other.CursorName, strings.ToUpper(rawName)) {
+// uniqueID keeps IDs distinct when a cursor name would otherwise repeat —
+// one unit per open, and a cursor reopened per branch yields several.
+func uniqueID(name string, used map[string]bool) string {
+	if name == "" {
+		name = "cursor"
+	}
+	if !used[name] {
+		used[name] = true
+		return name
+	}
+	for n := 2; ; n++ {
+		cand := fmt.Sprintf("%s_%d", name, n)
+		if !used[cand] {
+			used[cand] = true
+			return cand
+		}
+	}
+}
+
+// cursorWindowEnd is the line where the open at `from` stops owning its
+// cursor: the next declare/open of the same cursor, or EOF when the cursor is
+// never reopened. Statements at or after it belong to a sibling open.
+func cursorWindowEnd(facts *tsscan.SourceFacts, cursor string, from int) int {
+	end := math.MaxInt
+	for _, s := range facts.AllSQL {
+		if s.StartLine <= from || s.StartLine >= end {
 			continue
 		}
-		if other.Kind == tsscan.SQLOpen || other.Kind == tsscan.SQLFetch || other.Kind == tsscan.SQLClose {
-			if other.EndLine > q.EndLine {
-				q.EndLine = other.EndLine
+		if s.Kind != tsscan.SQLDeclareCursor && s.Kind != tsscan.SQLOpenCursorFor {
+			continue
+		}
+		if SameCursor(s.CursorName, cursor) {
+			end = s.StartLine
+		}
+	}
+	return end
+}
+
+// fetchIntoAfter is the INTO list of the first FETCH of `cursor` inside the
+// open's window.
+func fetchIntoAfter(facts *tsscan.SourceFacts, cursor string, from, window int) []string {
+	for _, s := range facts.AllSQL {
+		if s.Kind != tsscan.SQLFetch || s.StartLine < from || s.StartLine >= window {
+			continue
+		}
+		if SameCursor(s.CursorName, cursor) {
+			if into := parseIntoList(s.Normalized); len(into) > 0 {
+				return into
 			}
 		}
 	}
-	return q
+	return nil
+}
+
+// embeddedSpanEnd closes an embedded open's span at the cursor's first close
+// inside its window, else its first fetch there (a cursor left open past its
+// fetch), else where the statement itself ended.
+func embeddedSpanEnd(facts *tsscan.SourceFacts, cursor string, from, window, own int) int {
+	fetchEnd, closeLine := 0, 0
+	for _, s := range facts.AllSQL {
+		if s.StartLine <= from || s.StartLine >= window || !SameCursor(s.CursorName, cursor) {
+			continue
+		}
+		switch s.Kind {
+		case tsscan.SQLFetch:
+			if s.EndLine > fetchEnd {
+				fetchEnd = s.EndLine
+			}
+		case tsscan.SQLClose:
+			if closeLine == 0 || s.StartLine < closeLine {
+				closeLine = s.EndLine
+			}
+		}
+	}
+	if closeLine > 0 {
+		return closeLine
+	}
+	if fetchEnd > 0 {
+		return fetchEnd
+	}
+	return own
 }
 
 // cursorRawName recovers the cursor's raw-case name from normalized text.
@@ -92,6 +213,66 @@ func cursorBody(norm string) string {
 	return strings.TrimSpace(norm[idx+len("CURSOR FOR"):])
 }
 
+// embeddedCursorBody splits the EXECUTE-wrapped form into the cursor's
+// raw-case name and the SQL that follows `OPEN <cursor> FOR`.
+func embeddedCursorBody(norm string) (string, string) {
+	up := strings.ToUpper(norm)
+	i := 0
+	if j := wordIndexAfter(up, i, "EXECUTE"); j == i {
+		i = j + len("EXECUTE")
+	}
+	if j := wordIndexAfter(up, i, "BEGIN"); j == i {
+		i = j + len("BEGIN")
+	}
+	o := wordIndexAfter(up, i, "OPEN")
+	if o < 0 {
+		return "", ""
+	}
+	i = o + len("OPEN")
+	// ": name" — whitespace between the colon and the host name is legal
+	// Pro*C; scan past it, and the name itself carries no colon.
+	i = skipSpaceAfter(norm, i)
+	if i < len(norm) && norm[i] == ':' {
+		i++
+	}
+	i = skipSpaceAfter(norm, i)
+	start := i
+	for i < len(norm) && isIdentByteFor(norm[i]) {
+		i++
+	}
+	name := norm[start:i]
+	f := wordIndexAfter(up, i, "FOR")
+	if f < 0 {
+		return name, ""
+	}
+	return name, strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(norm[f+len("FOR"):]), "END"))
+}
+
+// wordIndexAfter finds kw at or after i on word boundaries, or -1.
+func wordIndexAfter(s string, i int, kw string) int {
+	for ; i+len(kw) <= len(s); i++ {
+		if equalFold(s[i:i+len(kw)], kw) &&
+			isWordBoundaryBefore(s, i) && isWordBoundaryAfter(s, i+len(kw)) {
+			return i
+		}
+	}
+	return -1
+}
+
+// skipSpaceAfter advances past whitespace (Normalized keeps newlines).
+func skipSpaceAfter(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// cursorKey folds the two pinned cursor-name spellings — the ':name' form
+// OPEN/FETCH/CLOSE carry and the bare 'name' a declare carries — onto one key.
+func cursorKey(name string) string {
+	return strings.ToUpper(strings.TrimPrefix(name, ":"))
+}
+
 // fetchIntoByCursor maps uppercased cursor names to the INTO list of their
 // first FETCH.
 func fetchIntoByCursor(facts *tsscan.SourceFacts) map[string][]string {
@@ -100,7 +281,7 @@ func fetchIntoByCursor(facts *tsscan.SourceFacts) map[string][]string {
 		if s.Kind != tsscan.SQLFetch {
 			continue
 		}
-		name := strings.ToUpper(s.CursorName)
+		name := cursorKey(s.CursorName)
 		if _, ok := out[name]; ok {
 			continue
 		}

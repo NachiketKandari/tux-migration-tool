@@ -256,7 +256,7 @@ func analyzeFacts(facts *scanner.SourceFacts, c corpus, opts Options) *Report {
 	selectCount, insertCount, updateCount, deleteCount, mergeCount := 0, 0, 0, 0, 0
 	for _, q := range facts.Queries {
 		switch q.Kind {
-		case scanner.SQLSelect, scanner.SQLDeclareCursor:
+		case scanner.SQLSelect, scanner.SQLDeclareCursor, scanner.SQLOpenCursorFor:
 			selectCount++
 		case scanner.SQLInsert:
 			insertCount++
