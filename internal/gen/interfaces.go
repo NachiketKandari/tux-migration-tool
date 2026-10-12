@@ -202,8 +202,8 @@ func (s *Service) ControllerInterface(p *plan.Plan) (string, error) {
 	}
 	for _, e := range s.Mapping.Endpoints {
 		data.Methods = append(data.Methods,
-			fmt.Sprintf("%s(ctx context.Context, request *models.%s) (data []*models.%s, err error)",
-				e.Name, s.requestType(e.Name), s.responseType(e.Name)))
+			fmt.Sprintf("%s(%s context.Context, request *models.%s) (data []*models.%s, err error)",
+				e.Name, common.GoCtx, s.requestType(e.Name), s.responseType(e.Name)))
 	}
 	return s.render(templates.ControllerInterfaceFile, data)
 }
@@ -256,6 +256,7 @@ func (s *Service) HandlerInterface(p *plan.Plan) (string, error) {
 		ControllerCtor:  "New" + s.If + "Controller",
 		StoreCtor:       "New" + s.If + "Store",
 		ReadDBs:         s.Mapping.ReadDBs,
+		CtxName:         common.GoCtx,
 	}
 	for _, e := range s.Mapping.Endpoints {
 		data.Methods = append(data.Methods, e.Name)
@@ -275,9 +276,12 @@ func (s *Service) HandlerMethodsFile() (string, error) {
 	sb.WriteString(")\n")
 	for _, e := range s.Mapping.Endpoints {
 		body, err := s.render(templates.HandlerMethod, templates.HandlerMethodData{
-			StructName:  common.LowerFirst(s.Mapping.Service) + "Handler",
-			Name:        e.Name,
-			RequestType: "models." + s.requestType(e.Name),
+			StructName:      common.LowerFirst(s.Mapping.Service) + "Handler",
+			Name:            e.Name,
+			RequestType:     "models." + s.requestType(e.Name),
+			Receiver:        common.GoHandlerRecv,
+			CtxName:         common.GoCtx,
+			ControllerField: "controller",
 		})
 		if err != nil {
 			return "", err

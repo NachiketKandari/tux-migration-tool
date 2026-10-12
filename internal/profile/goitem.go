@@ -41,7 +41,7 @@ func (goitem) Naming() Naming {
 // DB implements Profile.DB with the sqlx/tx-variant contract (decision 27).
 func (goitem) DB() DBRules {
 	return DBRules{
-		StoreReceiver: "s.store.",
+		StoreReceiver: common.GoStoreCallPrefix(),
 		TxVariants: func(queryType string) bool {
 			switch queryType {
 			case "INSERT", "UPDATE", "DELETE":

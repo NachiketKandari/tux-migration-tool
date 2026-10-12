@@ -1,4 +1,4 @@
-func (s *{{.StructName}}) {{.Name}}({{.CtxName}} context.Context, request *{{.RequestType}}) (data []*{{.ResponseType}}, err error) {
+func ({{.Receiver}} *{{.StructName}}) {{.Name}}({{.CtxName}} context.Context, request *{{.RequestType}}) (data []*{{.ResponseType}}, err error) {
 	logger.Log({{.CtxName}}).Debug("START")
 	defer logger.Log({{.CtxName}}).Debug("END")
 

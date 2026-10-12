@@ -613,10 +613,10 @@ func (s *Service) DBMethod(u plan.Unit) (body, signature string, needsSQL bool, 
 	}
 	sql = sqltext.Format(sql)
 	d := templates.DBMethodData{
-		Receiver:  "g",
+		Receiver:  common.GoStoreRecv,
 		StoreType: "store",
 		Name:      u.Name,
-		CtxName:   "c",
+		CtxName:   common.GoCtx,
 		Params:    params,
 		Query:     strings.TrimRight(sql, " \t\n;"),
 	}
@@ -673,9 +673,9 @@ func (s *Service) DBMethod(u plan.Unit) (body, signature string, needsSQL bool, 
 	if err != nil {
 		return "", "", false, err
 	}
-	sig := u.Name + "(c context.Context"
+	sig := u.Name + "(" + common.GoCtx + " context.Context"
 	if d.TxParam {
-		sig += ", tx *sqlx.Tx"
+		sig += ", " + common.GoTx + " *sqlx.Tx"
 	}
 	for _, p := range params {
 		sig += ", " + p.Name + " " + p.Type
@@ -694,6 +694,7 @@ func (s *Service) DBMethod(u plan.Unit) (body, signature string, needsSQL bool, 
 // long/varchar distinction is procedural, not semantic here).
 func (s *Service) dbParams(q *ir.Query, pin plan.MethodPin) ([]templates.ParamSpec, error) {
 	specs := make([]templates.ParamSpec, 0, len(q.Binds))
+	used := map[string]bool{common.GoCtx: true, common.GoStoreRecv: true}
 	for i, bind := range q.Binds {
 		spec := templates.ParamSpec{Name: common.CamelLowerGo(bind), Type: "string"}
 		if i < len(pin.Params) {
@@ -705,9 +706,27 @@ func (s *Service) dbParams(q *ir.Query, pin plan.MethodPin) ([]templates.ParamSp
 				spec.Type = typ
 			}
 		}
+		// A bind (or a user pin) can land on the receiver, the context or the
+		// tx handle — a bind literally named "c" is legal Pro*C and derived
+		// straight to a Go "c". Redeclaring any of them is a compile error the
+		// generated method cannot carry, so suffix past the collision here
+		// rather than let it reach the compiler or a gate.
+		spec.Name = uniqueGoParam(spec.Name, used)
+		used[spec.Name] = true
 		specs = append(specs, spec)
 	}
 	return specs, nil
+}
+
+// uniqueGoParam returns a name that collides with neither the method's own
+// reserved identifiers nor an earlier parameter, and records it.
+func uniqueGoParam(name string, used map[string]bool) string {
+	out := name
+	for out == "" || common.GoParamReserved(out) || used[out] {
+		out += "_"
+	}
+	used[out] = true
+	return out
 }
 
 func hasTimeParam(params []templates.ParamSpec) bool {

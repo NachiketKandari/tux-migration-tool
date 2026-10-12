@@ -49,7 +49,7 @@ func assignStoreCalls(src, receiver string, shape map[string]string) (string, in
 	}
 	recv := strings.TrimSuffix(receiver, ".")
 	if recv == "" {
-		recv = "s.store"
+		recv = common.GoCtrlRecv + "." + common.GoStoreField
 	}
 	callRe := common.CachedRegexp(`^(\s*)` + regexp.QuoteMeta(recv) + `\.([A-Za-z0-9_]+)\(`)
 	used := map[string]int{}

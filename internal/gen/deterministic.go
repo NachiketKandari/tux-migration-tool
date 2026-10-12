@@ -182,7 +182,7 @@ func (s *Service) DeterministicControllerBody(endpoint string, p *plan.Plan) (st
 		sb.WriteString("return data, nil")
 		return sb.String(), nil
 	}
-	sb.WriteString("err = utils.ExecTransaction(c, s.store.GetDB(), func(tx *sqlx.Tx) error {\n")
+	sb.WriteString("err = utils.ExecTransaction(" + common.GoCtx + ", " + common.GoStoreCallPrefix() + "GetDB(), func(" + common.GoTx + " *sqlx.Tx) error {\n")
 	for _, line := range strings.Split(strings.TrimRight(inner.String(), "\n"), "\n") {
 		sb.WriteString(detClosureLine(line) + "\n")
 	}
@@ -225,7 +225,7 @@ func (s *Service) DeterministicFnHelperBody(goName string, p *plan.Plan) (string
 	nested := detNestedHelperCalls(p, fnSrc, h, argTODOs)
 	stubTODOs := detStubTODOs(p, fnSrc)
 
-	decl := "func (s *" + structName + ") " + h.GoName + "(c context.Context"
+	decl := "func (" + common.GoCtrlRecv + " *" + structName + ") " + h.GoName + "(" + common.GoCtx + " context.Context"
 	for _, pr := range h.Params {
 		decl += ", " + pr.Name + " " + pr.Type
 	}
@@ -310,7 +310,7 @@ func (s *Service) DeterministicFnHelperBody(goName string, p *plan.Plan) (string
 		sb.WriteString(tail + "\n}")
 		return sb.String(), nil
 	}
-	sb.WriteString("err := utils.ExecTransaction(c, s.store.GetDB(), func(tx *sqlx.Tx) error {\n")
+	sb.WriteString("err := utils.ExecTransaction(" + common.GoCtx + ", " + common.GoStoreCallPrefix() + "GetDB(), func(" + common.GoTx + " *sqlx.Tx) error {\n")
 	closure := &strings.Builder{}
 	detEmitFnEvents(closure, ordered, nested, outs, voidRet, true)
 	for _, line := range strings.Split(strings.TrimRight(closure.String(), "\n"), "\n") {
@@ -927,7 +927,7 @@ func detEmitStoreCall(sb *strings.Builder, dc *detCall, errDecl *bool, outerErr 
 // detEmitHelper renders one same-file helper call: int-status helpers check
 // -1 with a named error, void helpers are fire-and-forget.
 func detEmitHelper(sb *strings.Builder, h *detHelper) {
-	call := "s." + h.goName + "(c"
+	call := common.GoCtrlRecv + "." + h.goName + "(" + common.GoCtx
 	for _, a := range h.args {
 		call += ", " + a
 	}
@@ -1321,7 +1321,7 @@ func detEmitFnStoreCall(sb *strings.Builder, dc *detCall, outs []plan.FnParam, v
 // detEmitFnHelper renders one nested helper call under the int-status
 // contract.
 func detEmitFnHelper(sb *strings.Builder, h *detHelper, outs []plan.FnParam, voidRet, inClosure bool) {
-	call := "s." + h.goName + "(c"
+	call := common.GoCtrlRecv + "." + h.goName + "(" + common.GoCtx
 	for _, a := range h.args {
 		call += ", " + a
 	}

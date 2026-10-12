@@ -204,7 +204,7 @@ func detRequiredHelpers(opts Options, c *ir.Condition) []string {
 		if !strings.Contains(src, h.Name+"(") {
 			continue
 		}
-		want := "s." + h.GoName + "("
+		want := common.GoCtrlRecv + "." + h.GoName + "("
 		if !seen[want] {
 			seen[want] = true
 			out = append(out, want)

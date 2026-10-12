@@ -469,7 +469,10 @@ func identAllowed(name string, allow map[string]bool) bool {
 		return true
 	}
 	switch name {
-	case "s", "context", "models", "logger", "errors", "fmt", "time", "sqlx", "utils":
+	// the layer-role receivers and the context parameter this build
+	// emits — the gate reads back bodies written against them.
+	case common.GoStoreRecv, common.GoCtrlRecv, common.GoHandlerRecv, common.GoCtx,
+		"context", "models", "logger", "errors", "fmt", "time", "sqlx", "utils":
 		return true
 	}
 	return false

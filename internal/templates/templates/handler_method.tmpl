@@ -1,15 +1,15 @@
-func (f *{{.StructName}}) {{.Name}}(c *gin.Context) {
-	logger.Log(c).Debug("SERVICE-START")
-	defer logger.Log(c).Debug("SERVICE-END")
+func ({{.Receiver}} *{{.StructName}}) {{.Name}}({{.CtxName}} *gin.Context) {
+	logger.Log({{.CtxName}}).Debug("SERVICE-START")
+	defer logger.Log({{.CtxName}}).Debug("SERVICE-END")
 	var request {{.RequestType}}
-	gCtx := &network.GinContext{Context: c}
+	gCtx := &network.GinContext{Context: {{.CtxName}}}
 
-	if err := c.BindJSON(&request); err != nil {
+	if err := {{.CtxName}}.BindJSON(&request); err != nil {
 		gCtx.BadRequestJSON(err, request)
 		return
 	}
 
-	data, err := f.controller.{{.Name}}(c, &request)
+	data, err := {{.Receiver}}.{{.ControllerField}}.{{.Name}}({{.CtxName}}, &request)
 
 	if err != nil {
 		gCtx.FailureJSON(err)

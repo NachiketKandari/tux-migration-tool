@@ -83,11 +83,11 @@ type ParamSpec struct{ Name, Type string }
 // positional :1 binds, columns aliased AS "COL" matching db tags, GetContext /
 // SelectContext / ExecContext).
 type DBMethodData struct {
-	Receiver   string // g
+	Receiver   string // s — the layer-role convention (common.GoStoreRecv)
 	StoreType  string // store
 	Name       string // GetItemDetails
 	Doc        string // optional doc comment (multi-line, already commented)
-	CtxName    string // c (item example) or ctx
+	CtxName    string // ctx (common.GoCtx)
 	Params     []ParamSpec
 	Query      string // backtick-free SQL body placed inside a raw string literal
 	VarName    string // scan target variable, e.g. itemDetails / dateinfo / count
@@ -239,7 +239,8 @@ type FnStubFileData struct {
 type ControllerMethodData struct {
 	StructName   string // "itemController"
 	Name         string // "ItemList"
-	CtxName      string // "ctx"
+	Receiver     string // "c" — the layer-role convention (common.GoCtrlRecv)
+	CtxName      string // "ctx" (common.GoCtx)
 	RequestType  string // "models.ItemRequest"
 	ResponseType string // "models.ItemResponse"
 	Body         string // logic including any return statements
@@ -261,6 +262,7 @@ type HandlerInterfaceData struct {
 	StoreCtor       string   // "NewItemStore"
 	ReadDBs         []string // "EBATEST", "PX"
 	Methods         []string
+	CtxName         string // "ctx" (common.GoCtx) — the gin context parameter
 }
 
 // ReadDBArgList renders the repo.Databases.ReadDatabase.* constructor args,
@@ -280,9 +282,12 @@ func (h HandlerInterfaceData) ReadDBArgList() string {
 
 // HandlerMethodData renders one gin handler method (PRD §4.8.6 handler shape).
 type HandlerMethodData struct {
-	StructName  string // "itemHandler"
-	Name        string // "ItemList"
-	RequestType string // "models.ItemRequest"
+	StructName      string // "itemHandler"
+	Name            string // "ItemList"
+	RequestType     string // "models.ItemRequest"
+	Receiver        string // "h" — the layer-role convention (common.GoHandlerRecv)
+	CtxName         string // "ctx" (common.GoCtx) — the gin context parameter
+	ControllerField string // "controller"
 }
 
 // DBSelectTxData renders a tx-variant single-row read (GetMarks shape in

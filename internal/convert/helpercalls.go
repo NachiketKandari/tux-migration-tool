@@ -12,6 +12,7 @@ package convert
 import (
 	"strings"
 
+	"tux-migration-tool/internal/common"
 	"tux-migration-tool/internal/plan"
 )
 
@@ -80,5 +81,5 @@ func helperCallSpelling(h plan.FnHelper, content string) string {
 			out = append(out, a)
 		}
 	}
-	return "s." + h.GoName + "(" + strings.Join(out, ", ") + ")"
+	return common.GoCtrlRecv + "." + h.GoName + "(" + strings.Join(out, ", ") + ")"
 }

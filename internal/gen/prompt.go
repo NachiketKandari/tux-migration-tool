@@ -174,9 +174,14 @@ func (s *Service) StoreCallsFor(ids []string, p *plan.Plan) (map[string]budget.D
 		for j, pp := range params {
 			args[j] = pp.Name
 		}
-		call := budget.DBCall{Receiver: "s.store", Name: u.Name, CtxName: "c", Args: args}
+		call := budget.DBCall{
+			Receiver: common.GoCtrlRecv + "." + common.GoStoreField,
+			Name:     u.Name,
+			CtxName:  common.GoCtx,
+			Args:     args,
+		}
 		if q := s.Query(canon.ID); u.Tx && q != nil && q.Type.IsDML() && q.Type != ir.QueryMerge {
-			call.Tx = "tx"
+			call.Tx = common.GoTx
 		}
 		calls[orig.ID] = call
 	}
@@ -197,8 +202,9 @@ func (s *Service) ControllerPromptContext(endpoint string, p *plan.Plan, storeMe
 		return "", fmt.Errorf("gen: no condition for endpoint %s", endpoint)
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "func (s *%s) %s(c context.Context, request *models.%s) (data []*models.%s, err error)\n",
-		common.LowerFirst(s.Mapping.Service)+"Controller", endpoint, s.requestType(endpoint), s.responseType(endpoint))
+	fmt.Fprintf(&sb, "func (%s *%s) %s(%s context.Context, request *models.%s) (data []*models.%s, err error)\n",
+		common.GoCtrlRecv, common.LowerFirst(s.Mapping.Service)+"Controller", endpoint,
+		common.GoCtx, s.requestType(endpoint), s.responseType(endpoint))
 	// The request contract mirrors ModelFile's derivation (§4.8.3 —
 	// requestFields): branch FmlGet ops, unioned with the entry-preamble
 	// Fgets whose host vars the branch consumes (live-run fix).
@@ -400,18 +406,20 @@ func responseShaping(s *Service, c *ir.Condition, p *plan.Plan, endpoint string,
 		for i, pp := range params {
 			argNames[i] = pp.Name + " " + pp.Type
 		}
+		storeCall := common.GoStoreCallPrefix() + u.Name
+		ctxArgs := append([]string{common.GoCtx}, argNames...)
 		switch {
 		case q.Type.IsDML():
-			fmt.Fprintf(&sb, "- s.store.%s(%s) returns error only.\n", u.Name, strings.Join(append([]string{"c"}, argNames...), ", "))
+			fmt.Fprintf(&sb, "- %s(%s) returns error only.\n", storeCall, strings.Join(ctxArgs, ", "))
 			continue
 		case isCountQuery(q):
-			fmt.Fprintf(&sb, "- s.store.%s(%s) returns int64 scalar — use directly, no struct, no loop.\n", u.Name, strings.Join(append([]string{"c"}, argNames...), ", "))
+			fmt.Fprintf(&sb, "- %s(%s) returns int64 scalar — use directly, no struct, no loop.\n", storeCall, strings.Join(ctxArgs, ", "))
 		case q.Type == ir.QuerySelectSingle:
 			row := s.RowName(u.QueryIDs[0], u.Name)
-			fmt.Fprintf(&sb, "- s.store.%s(%s) returns *models.%s (single row — read fields directly, no loop).\n", u.Name, strings.Join(append([]string{"c"}, argNames...), ", "), row)
+			fmt.Fprintf(&sb, "- %s(%s) returns *models.%s (single row — read fields directly, no loop).\n", storeCall, strings.Join(ctxArgs, ", "), row)
 		default:
 			row := s.RowName(u.QueryIDs[0], u.Name)
-			fmt.Fprintf(&sb, "- s.store.%s(%s) returns []*models.%s → one %s per row, in order.\n", u.Name, strings.Join(append([]string{"c"}, argNames...), ", "), row, s.responseType(endpoint))
+			fmt.Fprintf(&sb, "- %s(%s) returns []*models.%s → one %s per row, in order.\n", storeCall, strings.Join(ctxArgs, ", "), row, s.responseType(endpoint))
 		}
 		// Arg provenance.
 		if len(params) > 0 && len(q.Binds) > 0 {
@@ -503,7 +511,7 @@ func responseShaping(s *Service, c *ir.Condition, p *plan.Plan, endpoint string,
 	if !mapped {
 		fmt.Fprintf(&sb, "  init: data = make([]*models.%s, 0), then append the shaped element directly (no loop)\n", s.responseType(endpoint))
 	} else {
-		fmt.Fprintf(&sb, "  init: data = make([]*models.%s, 0); then append the shaped element once per returned row\n  (range over the slice you captured from the s.store call above; declare the capture)\n", s.responseType(endpoint))
+		fmt.Fprintf(&sb, "  init: data = make([]*models.%s, 0); then append the shaped element once per returned row\n  (range over the slice you captured from the %s call above; declare the capture)\n", s.responseType(endpoint), common.GoStoreCallPrefix())
 	}
 	return sb.String()
 }
@@ -515,7 +523,8 @@ func (s *Service) RenderControllerMethod(endpoint, body string) (string, error) 
 	return s.render(templates.ControllerMethod, templates.ControllerMethodData{
 		StructName:   common.LowerFirst(s.Mapping.Service) + "Controller",
 		Name:         endpoint,
-		CtxName:      "c",
+		Receiver:     common.GoCtrlRecv,
+		CtxName:      common.GoCtx,
 		RequestType:  "models." + s.requestType(endpoint),
 		ResponseType: "models." + s.responseType(endpoint),
 		Body:         strings.TrimRight(body, "\n"),

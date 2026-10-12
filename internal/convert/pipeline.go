@@ -757,10 +757,10 @@ func controllerBody(ctx context.Context, opts Options, res *Result, svc *gen.Ser
 
 const systemPrompt = `You emit the body of a Go controller method translated from a legacy Pro*C/Tuxedo branch.
 OUTPUT: bare Go statements only — no package/imports/func wrapper/helpers/types, no prose/fences/comments (S-codes live in error text), minimal blank lines. Stay terse: fit the output ceiling.
-SIGNATURE (fixed, verbatim): c context.Context, request *models.X, named returns data and err. Never req/resp/Response. Never shadow data/err with :=.
+SIGNATURE (fixed, verbatim): ctx context.Context, request *models.X, named returns data and err. Never req/resp/Response. Never shadow data/err with :=.
 HEADER: a leading else-if header is the method's own condition — never emit it or a leading }. Start at the first statement under it.
 INPUTS: request.<Field> exactly as defined — the only input source.
-STORE: every s.store.* call appears exactly once, exact params/order, results captured to locals — or _ = name // tuxconv:TODO when unmappable; s.<Name>(...) calls are generated helpers — call as shown. No other s.* calls. Never SQL.
+STORE: every c.store.* call appears exactly once, exact params/order, results captured to locals — or _ = name // tuxconv:TODO when unmappable; c.<Name>(...) calls are generated helpers — call as shown. No other c.* calls. Never SQL.
 FIELDS: verbatim struct/row names (CToDateString is not CToDate + String); sql.NullString via its .String field.
 LITERALS (Go only): "Y" never 'Y'; 0 never '\0'; == never =.
 ERRORS: after every err-returning call: if err != nil { return nil, err }. Every path ends return data, err / return nil, err. A variable error message uses errors.New(msg) — fmt.Errorf takes a constant format string, never a variable.
@@ -775,7 +775,7 @@ const fnHelperSystem = `You convert one legacy Pro*C/Tuxedo helper function (a f
 Rules:
 - Emit ONLY one complete Go method declaration: func (s *Receiver) Name(...) ... — no package clause, no imports, no helper functions or types.
 - The receiver and method name are fixed and provided verbatim in the prompt. When the prompt shows the complete fixed signature, declare exactly that parameter list and return type — same names, types, and order: callers are generated against it.
-- The first parameter is c context.Context (the store calls need it); the legacy parameters follow in order: char*/varchar value params become string, long becomes int64, int stays int; a parameter the legacy writes through a pointer (an out-param) becomes a pointer parameter (*string, *int64).
+- The first parameter is ctx context.Context (the store calls need it); the legacy parameters follow in order: char*/varchar value params become string, long becomes int64, int stays int; a parameter the legacy writes through a pointer (an out-param) becomes a pointer parameter (*string, *int64).
 - A call shown as s.<Name>(...) is a generated controller helper method — call it exactly as shown, passing your declared identifiers in that order.
 - Keep the legacy int status return: -1 on the failure paths, the legacy success value otherwise. Never add a Go error return.
 - Call the database exclusively through the store signatures provided — exactly the parameters each signature shows, same count and order, once per legacy SQL statement, in the legacy order. Never write SQL anywhere (no raw strings, no string literals containing SQL).
@@ -902,7 +902,7 @@ func fnHelperBody(ctx context.Context, opts Options, res *Result, svc *gen.Servi
 // parse-clean complete method, and the required-call contract.
 func fnHelperGate(body string, h plan.FnHelper, structName, view, receiver string) []string {
 	var errs []string
-	sig := "func (s *" + structName + ") " + h.GoName + "("
+	sig := "func (" + common.GoCtrlRecv + " *" + structName + ") " + h.GoName + "("
 	if !strings.Contains(body, sig) {
 		errs = append(errs, "the method must be declared with the fixed receiver and name: "+sig+"...) — emit one complete Go method, nothing else")
 	} else if want := fnHelperDecl(h, structName); h.Fixed && (len(h.Params) > 0 || h.Return != "") {
@@ -921,11 +921,11 @@ func fnHelperGate(body string, h plan.FnHelper, structName, view, receiver strin
 // legacy status return (empty for void).
 func fnHelperDecl(h plan.FnHelper, structName string) string {
 	parts := make([]string, 0, len(h.Params)+1)
-	parts = append(parts, "c context.Context")
+	parts = append(parts, common.GoCtx+" context.Context")
 	for _, p := range h.Params {
 		parts = append(parts, p.Name+" "+p.Type)
 	}
-	decl := "func (s *" + structName + ") " + h.GoName + "(" + strings.Join(parts, ", ") + ")"
+	decl := "func (" + common.GoCtrlRecv + " *" + structName + ") " + h.GoName + "(" + strings.Join(parts, ", ") + ")"
 	if h.Return != "" {
 		decl += " " + h.Return
 	}
@@ -983,7 +983,7 @@ func buildFnPrompt(h plan.FnHelper, structName, view, dbContract, rowContracts s
 	if rowContracts != "" {
 		sb.WriteString("Row struct definitions the store calls return — copy field names character-exact, never invent fields; a sql.NullString reads through its .String FIELD (no parentheses: row.X.String):\n" + rowContracts + "\n\n")
 	}
-	if calls := requiredCalls(view, "s.store."); len(calls) > 0 {
+	if calls := requiredCalls(view, common.GoStoreCallPrefix()); len(calls) > 0 {
 		sb.WriteString("REQUIRED CALLS — every one must appear in the method, in the legacy order: " +
 			strings.Join(calls, ", ") + "\n\n")
 	}
@@ -1363,7 +1363,7 @@ func scenPromptOf(sc *flow.Scenario, diff *flow.ScenarioDiff) *scenPrompt {
 			p.TxNotes = append(p.TxNotes, fmt.Sprintf("legacy tx span %d→%d (%s) — the view carries the utils.ExecTransaction open/close template; the wrapper owns begin/commit", s.BeginLine, s.CommitLine, txKindName(s.Kind)))
 		}
 		p.TxNotes = append(p.TxNotes,
-			fmt.Sprintf("DML queries %s ride those transactions and their store calls take tx — wrap each call in utils.ExecTransaction(c, s.store.GetDB(), func(tx *sqlx.Tx) error { ...; return nil }); the wrapper owns begin/commit/rollback",
+			fmt.Sprintf("DML queries %s ride those transactions and their store calls take tx — wrap each call in utils.ExecTransaction(ctx, c.store.GetDB(), func(tx *sqlx.Tx) error { ...; return nil }); the wrapper owns begin/commit/rollback",
 				strings.Join(txIDs, ", ")))
 	}
 	if len(sc.TxAborts) > 0 {
@@ -1479,7 +1479,7 @@ func legacyHelpers(p *plan.Plan, view string) []string {
 		if seen[fn] {
 			continue
 		}
-		if !strings.Contains(view, h.Name) && !strings.Contains(view, "s."+h.GoName+"(") {
+		if !strings.Contains(view, h.Name) && !strings.Contains(view, common.GoCtrlRecv+"."+h.GoName+"(") {
 			continue
 		}
 		seen[fn] = true
@@ -1492,7 +1492,7 @@ func legacyHelpers(p *plan.Plan, view string) []string {
 		}
 		seen[fn] = true
 		if method, ok := fnMethod[fn]; ok {
-			out = append(out, fmt.Sprintf("%s(...) → s.store.%s(...) — its SQL lookup is this store method (see the DB contract); translate the fn's remaining logic inline, declaring any locals you need", fn, method))
+			out = append(out, fmt.Sprintf("%s(...) → %s%s(...) — its SQL lookup is this store method (see the DB contract); translate the fn's remaining logic inline, declaring any locals you need", fn, common.GoStoreCallPrefix(), method))
 			continue
 		}
 		if pureLogic[fn] {
@@ -1509,11 +1509,11 @@ func legacyHelpers(p *plan.Plan, view string) []string {
 // deterministic signature both seams were given.
 func helperCallLine(h plan.FnHelper) string {
 	parts := make([]string, 0, len(h.Params)+1)
-	parts = append(parts, "c context.Context")
+	parts = append(parts, common.GoCtx+" context.Context")
 	for _, p := range h.Params {
 		parts = append(parts, p.Name+" "+p.Type)
 	}
-	sig := "s." + h.GoName + "(" + strings.Join(parts, ", ") + ")"
+	sig := common.GoCtrlRecv + "." + h.GoName + "(" + strings.Join(parts, ", ") + ")"
 	if h.Return != "" {
 		sig += " " + h.Return
 	}
@@ -1549,7 +1549,7 @@ func helperFns(p *plan.Plan) map[string]plan.FnHelper {
 func buildPrompt(view budget.View, dbContract, contract, endpoint, draft string, stubs []plan.Stub, helpers, constants, errCodes []string, scen *scenPrompt) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Endpoint: %s\n\n", endpoint)
-	writePromptFacts(&sb, viewWording, scen, true, view.Source, "s.store.", dbContract, contract, helpers, constants, errCodes, stubs)
+	writePromptFacts(&sb, viewWording, scen, true, view.Source, common.GoStoreCallPrefix(), dbContract, contract, helpers, constants, errCodes, stubs)
 	sb.WriteString("Legacy branch (SQL already replaced by store calls):\n\n" + view.Source + "\n")
 	if draft != "" {
 		sb.WriteString("\nDeterministic flow draft (parsed from the control flow — verify it, fix field mappings, keep the flow and every store call):\n" + draft + "\n")
@@ -1682,7 +1682,7 @@ func storeCallRe(receiver string) *regexp.Regexp {
 // helper methods (controller/fns.go) the view shows after the call-site
 // rewrite. Store-receiver calls never match — their selector has a dot
 // before the method name.
-var helperCallRe = regexp.MustCompile(`\bs\.([A-Za-z0-9_]+)\(`)
+var helperCallRe = regexp.MustCompile(`\b` + common.GoCtrlRecv + `\.([A-Za-z0-9_]+)\(`)
 
 // requiredCalls lists the unique calls the view requires, in order: every
 // store method with the profile's receiver prefix, plus every bare
@@ -1701,7 +1701,7 @@ func requiredCalls(view string, receiver string) []string {
 		add(receiver + m[1])
 	}
 	for _, m := range helperCallRe.FindAllStringSubmatch(view, -1) {
-		add("s." + m[1])
+		add(common.GoCtrlRecv + "." + m[1])
 	}
 	return out
 }
@@ -1743,7 +1743,7 @@ func txGateErrs(body string, calls map[string]budget.DBCall) []string {
 	sort.Strings(names)
 	var errs []string
 	if !strings.Contains(body, "ExecTransaction(") {
-		errs = append(errs, "transaction contract: the branch's DML calls take tx — the body must wrap the flow in utils.ExecTransaction(c, s.store.GetDB(), func(tx *sqlx.Tx) error { ...; return nil }); the wrapper owns begin/commit/rollback")
+		errs = append(errs, "transaction contract: the branch's DML calls take tx — the body must wrap the flow in utils.ExecTransaction(ctx, c.store.GetDB(), func(tx *sqlx.Tx) error { ...; return nil }); the wrapper owns begin/commit/rollback")
 	}
 	for _, name := range names {
 		call := txCalls[name]
@@ -1961,7 +1961,7 @@ func branchSource(src string, from, to int) string {
 func bodyParseWrap(body string) string {
 	// The signature mirrors the rendered method (request/data/err declared)
 	// so the undeclared-identifier gate sees only genuinely unknown names.
-	return "package controller\n\nimport (\n\t\"context\"\n\tmodels \"root-folder/pkg/services/item/models\"\n)\n\ntype t struct{}\n\nfunc (t) Check(c context.Context, request *models.Request) (data []*models.Response, err error) {\n" + body + "\n}\n"
+	return "package controller\n\nimport (\n\t\"context\"\n\tmodels \"root-folder/pkg/services/item/models\"\n)\n\ntype t struct{}\n\nfunc (t) Check(ctx context.Context, request *models.Request) (data []*models.Response, err error) {\n" + body + "\n}\n"
 }
 
 // validateBody checks the body wrapped in a synthetic method. gofmt
@@ -2291,7 +2291,7 @@ func dbSignaturesFor(p *plan.Plan, bodies map[string]dbOut, methods []string) st
 			continue
 		}
 		b := bodies[u.ID]
-		lines = append(lines, "s.store."+b.sig)
+		lines = append(lines, common.GoStoreCallPrefix()+b.sig)
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")

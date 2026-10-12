@@ -14,7 +14,7 @@ type {{.StructName}} struct {
 
 type {{.IfaceName}} interface {
 {{- range .Methods}}
-	{{.}}(c *gin.Context)
+	{{.}}({{$.CtxName}} *gin.Context)
 {{- end}}
 }
 

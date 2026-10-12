@@ -17,9 +17,11 @@ import (
 // the abort sites and the tx-handle guards/init/declarations the wrapper
 // subsumes, and leaves everything else byte-identical.
 
-const (
-	txOpenLine = "err = utils.ExecTransaction(c, s.store.GetDB(), func(tx *sqlx.Tx) error {"
-)
+// txOpenLine is built from the shared naming constants rather than spelled as
+// a literal, so the injected template line can never disagree with the method
+// signature the gates check it against. It is a var because the constants
+// arrive through a function call (GoStoreCallPrefix).
+var txOpenLine = "err = utils.ExecTransaction(" + common.GoCtx + ", " + common.GoStoreCallPrefix() + "GetDB(), func(" + common.GoTx + " *sqlx.Tx) error {"
 
 var txCloseLines = []string{
 	"return nil",
