@@ -505,9 +505,22 @@ func splitSelectRefs(norm string) (binds, into []string) {
 // scanHostRefs captures the base names of :host refs in s[from:to];
 // array-occurrence subscripts are consumed and stripped. Whitespace between
 // the colon and the name is legal Pro*C (": var") and is scanned past.
+//
+// String literals are skipped. A literal is data, never Pro*C syntax, and the
+// Oracle time mask is exactly the shape an unquoted scan harvests phantom host
+// variables from: `TO_CHAR(A_DATE,'HH24:MI:SS')` yields :MI and :SS, which
+// land in Binds and inflate BindArity — and with it the generated parameter
+// list, since internal/gen builds ParamSpecs straight from Query.Binds.
+// sqltext.ExecutableBinds already scans literals correctly; this brings the
+// IR's own scan to the same discipline so the two can never disagree about
+// what a statement binds.
 func scanHostRefs(s string, from, to int) []string {
 	var out []string
 	for i := from; i < to; i++ {
+		if s[i] == '\'' {
+			i = skipLiteralFor(s, i, to)
+			continue
+		}
 		if s[i] != ':' {
 			continue
 		}
@@ -536,6 +549,24 @@ func scanHostRefs(s string, from, to int) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// skipLiteralFor returns the index of the quote closing the string literal
+// opened at s[i], honouring Oracle's doubled-quote escape and never reading
+// past to. An unterminated literal yields to-1, so the caller's loop still
+// terminates on malformed source instead of running off the span.
+func skipLiteralFor(s string, i, to int) int {
+	for j := i + 1; j < to; j++ {
+		if s[j] != '\'' {
+			continue
+		}
+		if j+1 < to && s[j+1] == '\'' {
+			j++
+			continue
+		}
+		return j
+	}
+	return to - 1
 }
 
 // clauseEndAfter finds the next top-level clause keyword at or after from.

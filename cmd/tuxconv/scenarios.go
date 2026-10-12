@@ -78,6 +78,23 @@ func scenarioArtifacts(log *slog.Logger, dir, entry string, src []byte, scens []
 			return written, fmt.Errorf("scenarios: write %s: %w", jsonPath, err)
 		}
 		written = append(written, md, jsonPath)
+
+		// The query reuse twin: of the units two arms both reach, are they the
+		// same statement, and if not, where do they differ? Same contract —
+		// written verbatim beside the shared report, no ledger, no validation.
+		reuse := flow.BuildQueryReuse(entry, irFile, diff, tree)
+		reuseMD, reuseJSON := filepath.Join(dir, entry+".qreuse.md"), filepath.Join(dir, entry+".qreuse.json")
+		if err := os.WriteFile(reuseMD, []byte(flow.RenderQueryReuseMD(reuse)), 0o644); err != nil {
+			return written, fmt.Errorf("scenarios: write %s: %w", reuseMD, err)
+		}
+		rdata, err := json.MarshalIndent(reuse, "", "  ")
+		if err != nil {
+			return written, err
+		}
+		if err := os.WriteFile(reuseJSON, append(rdata, '\n'), 0o644); err != nil {
+			return written, fmt.Errorf("scenarios: write %s: %w", reuseJSON, err)
+		}
+		written = append(written, reuseMD, reuseJSON)
 	}
 	if log != nil {
 		log.Info("scenario artifacts written", "dir", dir, "entry", entry, "files", len(written))
