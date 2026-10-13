@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"tux-migration-tool/internal/common"
+	"tux-migration-tool/internal/contract"
 	"tux-migration-tool/internal/llm"
 	"tux-migration-tool/internal/pychk"
 	"tux-migration-tool/internal/pyplan"
@@ -99,6 +100,35 @@ func userPrompt(p *pyplan.Plan, opts Options, notes []string) string {
 		sb.WriteString("\nDropped constructs (do not reintroduce):\n")
 		for _, d := range p.Flow.Dropped {
 			fmt.Fprintf(&sb, "  - [%s] %s (line %d)\n", d.Kind, d.Call, d.Line)
+		}
+	}
+	if len(p.Flow.Guards.Views) > 0 {
+		// The polarity table, stated as consequences. The CodeView already
+		// carries these inline at each guard's own line; this repeats them as
+		// a list because the one rule a model reliably gets wrong here is
+		// treating an empty result as an error (or not) uniformly across a
+		// batch where the source is explicit per site.
+		sb.WriteString("\nSQLCODE guard census — the legacy failure contract of each read " +
+			"(already translated inline in each block's view; obey it exactly):\n")
+		for _, g := range p.Flow.Guards.Views {
+			var what string
+			switch {
+			case g.Benign:
+				what = "no-rows case — the query succeeded and matched nothing; not an error"
+			case g.Policy == contract.PolicyTolerantNoRows:
+				what = "empty result is NOT an error (guard excludes NO_DATA_FOUND)"
+			case g.Policy == contract.PolicyStrict:
+				what = "empty result IS an error (guard is a bare `SQLCODE != 0`)"
+			default:
+				what = "polarity unreadable — treat a database failure as an error"
+			}
+			if g.ErrCode != "" {
+				what += "; legacy message code " + g.ErrCode
+			}
+			if g.Compensates {
+				what += "; the legacy branch also rolled back / closed before exiting"
+			}
+			fmt.Fprintf(&sb, "  - line %d: %s\n", g.Line, what)
 		}
 	}
 	if len(notes) > 0 {

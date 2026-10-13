@@ -167,6 +167,36 @@ const (
 	//
 	// The census reports it separately and (*WalkReport).Tidy fails on it.
 	ReasonUnclassified = "R-UNCLASSIFIED"
+
+	// ReasonErrorPolicyUnclassified is a legacy SQLCODE status guard whose
+	// polarity the classifier could not read with confidence — a predicate
+	// that OR-s the status register with an unrelated business test, or one
+	// that degrades to pred.Raw.
+	//
+	// It is NOT an emitter defect and NOT a missing guard: the guard is
+	// accounted for and the emitters fall back to their per-type default.
+	// The count is the classifier's own coverage metric. It matters because
+	// the failure mode is silent in the worst way — an unreadable guard looks
+	// exactly like a guard that was read and found tolerant, so a corpus
+	// spelling the classifier had not seen would quietly keep the previous
+	// behaviour while the census reported nothing at all.
+	//
+	// Non-zero means either the corpus grew a new spelling (extend
+	// flow.ErrorPolicyOf and the benign-code table) or a spelling regressed.
+	ReasonErrorPolicyUnclassified = "R-ERROR-POLICY-UNCLASSIFIED"
+
+	// ReasonNoRowsPolarityMismatch is an emitted method whose error handling
+	// contradicts the polarity its source guard declared — a strict read that
+	// swallows sql.ErrNoRows, or a tolerant one that propagates it.
+	//
+	// Kept apart from ReasonErrorPolicyUnclassified because it is strictly
+	// worse. An unclassified guard is missing information; a mismatch means
+	// the generated code asserts something the C does not, and it does so
+	// silently: a strict read that swallows ErrNoRows returns a zero value
+	// and a nil error where the legacy code returned a failure, so the caller
+	// is handed the wrong answer with no error to notice it by. Same
+	// reasoning as ReasonCallOutsideItsGuard above.
+	ReasonNoRowsPolarityMismatch = "R-NO-ROWS-POLARITY-MISMATCH"
 )
 
 // AllReasons is the census key order: the real codes first, R-UNCLASSIFIED
@@ -182,6 +212,8 @@ var AllReasons = []string{
 	ReasonTPCallNotRendered,
 	ReasonNoStoreCalls,
 	ReasonResponseReadKept,
+	ReasonErrorPolicyUnclassified,
+	ReasonNoRowsPolarityMismatch,
 	ReasonUnclassified,
 }
 
@@ -260,6 +292,19 @@ var (
 	// …". Anchored on the code, like the other register-marked shapes, so
 	// the prose after the colon can be reworded without moving the count.
 	responseReadKeptRe = regexp.MustCompile(`^` + ReasonResponseReadKept + `\b`)
+
+	// errorPolicyUnclassifiedRe matches the marker a target emits for a
+	// SQLCODE guard whose polarity could not be read. The guard's legacy line
+	// and its raw condition ride in the message so a non-zero count names the
+	// specific site to extend the classifier for, rather than only saying
+	// "somewhere a guard was unreadable".
+	errorPolicyUnclassifiedRe = regexp.MustCompile(`^` + ReasonErrorPolicyUnclassified + `\b`)
+
+	// noRowsMismatchRe matches the marker for an emitted method whose error
+	// handling contradicts its source guard's polarity. It names both poles —
+	// the declared policy and what was emitted — because a mismatch is only
+	// actionable once you can see which side is wrong.
+	noRowsMismatchRe = regexp.MustCompile(`^` + ReasonNoRowsPolarityMismatch + `\b`)
 )
 
 // patterns maps a reason code to the message shapes that carry it. The four
@@ -275,6 +320,8 @@ var patterns = map[string][]*regexp.Regexp{
 	ReasonControlFlowNotRendered:    {controlFlowRe},
 	ReasonCallOutsideItsGuard:       {callOutsideGuardRe},
 	ReasonTPCallNotRendered:         {tpcallRe},
+	ReasonErrorPolicyUnclassified:   {errorPolicyUnclassifiedRe},
+	ReasonNoRowsPolarityMismatch:    {noRowsMismatchRe},
 }
 
 // TODOPrefix is the marker every emitted gap comment carries. It is the

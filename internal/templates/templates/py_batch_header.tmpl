@@ -11,6 +11,17 @@ import oracledb
 
 from {{.WrapperImport}} import {{.RouterClass}}, DbMode
 
+
+class NoRowsError(Exception):
+    """A single-row read returned nothing where the legacy SQLCODE guard
+    declared that an empty result is a failure (`if (SQLCODE != 0)`).
+
+    Distinct from a database error: the statement ran and succeeded, it simply
+    matched no row — which the legacy code treated as a failure rather than an
+    empty result. Raised only for reads whose guard said so; a tolerant guard
+    returns None instead.
+    """
+
 logger = logging.getLogger("{{.LoggerName}}")
 
 CHUNK_SIZE = {{.ChunkSize}}

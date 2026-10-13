@@ -1,5 +1,6 @@
     def {{.Name}}(self{{range .Binds}}, {{.}}: Any{{end}}) -> Optional[Tuple]:
-        """{{.Doc}}"""
+        """{{.Doc}}{{if .ErrPolicyName}}
+        Error policy ({{.ErrPolicyName}}): taken from the legacy SQLCODE guard.{{end}}"""
         with self.db_router.get_connection(mode={{.ReadMode}}) as conn:
             with conn.cursor() as cur:
 {{- if .HasBinds}}
@@ -7,4 +8,12 @@
 {{- else}}
                 cur.execute({{.Const}})
 {{- end}}
-                return cur.fetchone()
+                row = cur.fetchone()
+{{- if .NoRowsIsError}}
+                if row is None:
+                    # The legacy guard read `SQLCODE != 0` (or the bare
+                    # `if (SQLCODE)` form): an empty result IS a failure there,
+                    # so it must not pass for a successful fetch of nothing.
+                    raise NoRowsError("{{.Const}} returned no rows")
+{{- end}}
+                return row

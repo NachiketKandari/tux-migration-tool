@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"tux-migration-tool/internal/contract"
 	"tux-migration-tool/internal/pyplan"
 	"tux-migration-tool/internal/templates"
 )
@@ -51,6 +52,20 @@ type repoData struct {
 	ReadMode, WriteMode string
 	Binds               []string
 	HasBinds            bool
+	// NoRowsIsError mirrors the legacy SQLCODE guard's polarity: does an
+	// empty result count as a failure? The templates use it to decide whether
+	// a single-row fetch that came back empty raises or returns None.
+	//
+	// It is a bool rather than the policy itself because the templates need a
+	// decision, and "unset" must map to the pre-existing behaviour rather than
+	// to a default polarity. Strict reads it directly; tolerant and unset both
+	// read false.
+	NoRowsIsError bool
+	// ErrPolicyName is the source's own word for the policy, rendered into the
+	// docstring so a reader of the generated Python can see that the polarity
+	// came from the legacy guard rather than from a guess. Empty when the
+	// source stated no contract.
+	ErrPolicyName string
 }
 
 type serviceShellData struct {
@@ -74,6 +89,14 @@ func renderRepoMethod(prov templates.Provider, p *pyplan.Plan, m pyplan.RepoMeth
 		Name: m.Name, Doc: repoDoc(m),
 		ReadMode: p.Wrapper.ReadMode, WriteMode: p.Wrapper.WriteMode,
 		Binds: m.Binds, HasBinds: len(m.Binds) > 0, BindKwargs: kwargs(m.Binds),
+		// The legacy guard decides whether an empty result is a failure. Only
+		// an explicit strict verdict raises; tolerant and unset keep the
+		// pre-existing return-None behaviour, because "the source said
+		// nothing" is not the same claim as "the source said tolerant".
+		NoRowsIsError: m.ErrPolicy == contract.PolicyStrict,
+	}
+	if m.ErrPolicy.IsSet() {
+		d.ErrPolicyName = string(m.ErrPolicy)
 	}
 	if len(m.Consts) > 0 {
 		d.Const = m.Consts[0]

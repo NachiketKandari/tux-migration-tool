@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"tux-migration-tool/internal/contract"
+	"tux-migration-tool/internal/flow"
 	"tux-migration-tool/internal/ir"
 	scanner "tux-migration-tool/internal/tsscan"
 )
@@ -101,6 +103,56 @@ type Flow struct {
 	Dropped      []DropSite     `json:"dropped"`
 	Logs         []LogSite      `json:"logs"`
 	Queries      []*ir.Query    `json:"queries"` // unique query units inside the entry body, IR order
+	// Guards is the SQLCODE census of the entry body. Its presence is what
+	// lets a target honour the source's failure contract instead of picking
+	// one per query type.
+	Guards Guards `json:"guards"`
+}
+
+// Guards is the post-query status-guard inventory of the entry body: every
+// `if (SQLCODE …)` branch paired with the query it follows, and the polarity
+// that branch declares.
+//
+// Flow has no branch field today, so this is the batch path's only record that
+// a query's failure contract was ever stated. Without it the guard reaches the
+// LLM seam as untranslated C — a bare `if(SQLCODE != 0)` header whose body has
+// already been replaced by `# dropped [errorlog]` — and an empty result is
+// indistinguishable from a failure.
+type Guards struct {
+	// Strict counts guards where an empty result IS a failure
+	// (`if (SQLCODE != 0)`).
+	Strict int `json:"strict"`
+	// TolerantNoRows counts guards where an empty result is a SUCCESS
+	// (`if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)`).
+	TolerantNoRows int `json:"tolerant_no_rows"`
+	// Unclassified counts guards whose polarity could not be read with
+	// confidence. Non-zero is a coverage signal, not a failure: those queries
+	// keep the per-type default and the count says so.
+	Unclassified int `json:"unclassified"`
+	// Benign counts `== NO_DATA_FOUND` arms — success arms that declare no
+	// failure contract of their own.
+	Benign int `json:"benign"`
+	// ByQuery is the per-query verdict, so an emitter reads the polarity off
+	// the query it is emitting rather than re-deriving it.
+	ByQuery map[string]contract.ErrorPolicy `json:"by_query,omitempty"`
+	// Views is the same inventory as one span per guard, for the CodeView.
+	// The seam needs the guard's own line and extent, not just the tally:
+	// without it the guard header reaches the model as untranslated C with
+	// its body already elided.
+	Views []GuardView `json:"views,omitempty"`
+}
+
+// GuardView is one status guard as the seam's CodeView must see it: the legacy
+// line it occupies, and the contract it states. It is deliberately a
+// translation of the guard's *meaning*, not of its spelling — the CodeView's
+// job is to be implemented, and `SQLCODE` cannot be implemented in Python.
+type GuardView struct {
+	Line        int                  `json:"line"`
+	EndLine     int                  `json:"end_line,omitempty"`
+	Policy      contract.ErrorPolicy `json:"policy"`
+	Benign      bool                 `json:"benign,omitempty"`
+	Compensates bool                 `json:"compensates,omitempty"`
+	ErrCode     string               `json:"err_code,omitempty"`
 }
 
 // Build derives the flow skeleton from the file IR, the scanner facts, and
@@ -186,8 +238,65 @@ func Build(f *ir.File, facts *scanner.SourceFacts, src string) *Flow {
 
 	flow.Dropped = droppedSites(facts, flow.BodyStart, flow.BodyEnd)
 	flow.Logs = logSites(facts, flow.BodyStart, flow.BodyEnd)
+	flow.Guards = censusGuards(facts, f, flow.Queries, flow.BodyStart, flow.BodyEnd)
 	flow.Shape = rubric(flow)
 	return flow
+}
+
+// censusGuards pairs every query in the flow with the SQLCODE guard that
+// immediately follows it and tallies the polarities.
+//
+// The pairing is the same adjacency rule the Go path uses (flow.GuardAfter):
+// the nearest status branch below the query's last line, within the guard
+// window. Queries with no guard contribute nothing, which is correct — the
+// source stated no contract there, so the emitter keeps its default.
+//
+// Tallying is what makes this a census rather than a side table. A guard whose
+// polarity could not be read lands in Unclassified instead of being guessed,
+// so a corpus spelling the classifier does not know shows up as a number
+// rather than as quietly-wrong error handling.
+func censusGuards(facts *scanner.SourceFacts, f *ir.File, queries []*ir.Query, start, end int) Guards {
+	g := Guards{ByQuery: map[string]contract.ErrorPolicy{}}
+	for _, q := range queries {
+		if q.StartLine < start || q.StartLine > end {
+			continue
+		}
+		guard, ok := flow.GuardAfter(facts, q)
+		if !ok {
+			continue
+		}
+		switch {
+		case guard.Policy.IsSet():
+			g.ByQuery[q.ID] = guard.Policy
+			g.Views = append(g.Views, viewOf(guard))
+		case guard.Benign:
+			g.Benign++
+			g.Views = append(g.Views, viewOf(guard))
+		default:
+			// A status-referencing branch that is neither a declared policy
+			// nor a pure success arm: a no-rows test fused with business
+			// logic. It declares no failure contract, so it does not become a
+			// query verdict — but it is not silently dropped either, and the
+			// seam still gets a translation of it.
+			g.Unclassified++
+			g.Views = append(g.Views, viewOf(guard))
+		}
+		switch guard.Policy {
+		case contract.PolicyStrict:
+			g.Strict++
+		case contract.PolicyTolerantNoRows:
+			g.TolerantNoRows++
+		}
+	}
+	return g
+}
+
+// viewOf projects a flow.Guard onto the CodeView shape.
+func viewOf(g flow.Guard) GuardView {
+	return GuardView{
+		Line: g.Line, EndLine: g.EndLine, Policy: g.Policy,
+		Benign: g.Benign, Compensates: g.Compensates, ErrCode: g.ErrCode,
+	}
 }
 
 // rubric decides the shape: simple only when the cursor-batch rubric covers

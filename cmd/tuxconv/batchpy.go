@@ -236,6 +236,7 @@ func writeBatchModuleReport(w io.Writer, name string, res pygen.Result, out stri
 		name, ret.Shape, ret.DMLLoop, ret.SelectTotal+ret.DMLTotal, ret.PhasesTotal, ret.PyMode,
 		ret.SQLDeviations, ret.Percent(), ret.LLMCalls, ret.LogCallsEmitted, ret.LogSitesTotal,
 		filepath.Join(out, name+".py"))
+	writeGuardCensus(w, res.Guards)
 	writeBatchCensus(w, res.Census)
 	for _, n := range res.Notes {
 		fmt.Fprintln(w, "  note:", n)
@@ -255,6 +256,29 @@ func writeBatchModuleReport(w io.Writer, name string, res pygen.Result, out stri
 	}
 	if !res.PyOK && ret.PyMode == "ast" {
 		fmt.Fprintln(w, "  python syntax:", res.PyDetail)
+	}
+}
+
+// writeGuardCensus reports the SQLCODE polarity census: how many of the
+// legacy post-query guards said "an empty result is an error", how many said it
+// is not, and how many could not be read.
+//
+// `unclassified` is the line that matters. A non-zero count means a guard's
+// meaning is unknown and the emitted code fell back to a default rather than
+// the source's contract — the seam must be told, because the model cannot
+// infer a polarity it was never shown. Zero is the expected state and the
+// reason to print it at all: this is the counter
+// docs/pybatchpy-logic-plan.md:234 names as the deliverable ("27 of 27 SQLCODE
+// arms recognised"), which until now did not exist.
+func writeGuardCensus(w io.Writer, g batchflow.Guards) {
+	if g.Strict == 0 && g.TolerantNoRows == 0 && g.Unclassified == 0 && g.Benign == 0 {
+		return // no guards in this program: nothing measured, nothing claimed
+	}
+	fmt.Fprintf(w, "  census sqlcode guards: strict=%d tolerant_no_rows=%d benign=%d unclassified=%d\n",
+		g.Strict, g.TolerantNoRows, g.Benign, g.Unclassified)
+	if g.Unclassified > 0 {
+		fmt.Fprintf(w, "  census sqlcode finding: %d guard(s) declare no readable polarity — "+
+			"their emitted error handling is a default, not the source's contract\n", g.Unclassified)
 	}
 }
 

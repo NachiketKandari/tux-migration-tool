@@ -98,7 +98,24 @@ type RepoMethod struct {
 	// retained one first. They are the fold's audit trail: every query id in
 	// the flow must appear in exactly one method or one date-math entry.
 	MergedQueryIDs []string
+	// ErrPolicy is the failure contract the legacy SQLCODE guard declared for
+	// this method's query: does an empty result count as an error? Empty means
+	// the source said nothing, which is NOT the same as "strict" — the emitted
+	// method keeps its existing behaviour in that case.
+	ErrPolicy contract.ErrorPolicy
 }
+
+// TolerantNoRows reports whether an empty result is a success under the
+// declared policy. Unset is false: the template's own default applies and this
+// predicate must not override it.
+func (m RepoMethod) TolerantNoRows() bool {
+	return m.ErrPolicy == contract.PolicyTolerantNoRows
+}
+
+// ErrPolicySet reports whether a policy was read from a guard at all, so an
+// emitter can distinguish "the source said nothing" from "the source said
+// strict" and log the difference.
+func (m RepoMethod) ErrPolicySet() bool { return m.ErrPolicy.IsSet() }
 
 // calledIn reports whether any of the method's source sites falls inside the
 // inclusive line range. It reads the folded sites as well as the retained one,
@@ -249,6 +266,22 @@ func Build(flow *batchflow.Flow, opts Options) *Plan {
 		rb.add(s.Query, s.TruncateSQL, s.InLoop, firstTable(s.Query))
 	}
 	rb.finish()
+
+	// Carry each query's declared failure contract onto its repository method,
+	// so the emitted code honours the legacy guard's polarity rather than a
+	// per-verb guess. The census comes off the flow; nothing is re-derived
+	// here. A method that folded several queries inherits the first declared
+	// policy — the fold only merges identical statements, so their guards
+	// agree in every corpus case, and a disagreement would need a per-site
+	// list (see the plan's open decision 3).
+	for i := range p.Repo {
+		for _, id := range p.Repo[i].MergedQueryIDs {
+			if pol, ok := flow.Guards.ByQuery[id]; ok {
+				p.Repo[i].ErrPolicy = pol
+				break
+			}
+		}
+	}
 	return p
 }
 
@@ -570,9 +603,20 @@ func (p *Plan) codeViewEntries(src string) []viewEntry {
 		}
 		placeholder[start] = "# dropped [" + string(d.Kind) + "]: " + d.Call
 	}
+	// The status-guard spans. A `if (SQLCODE != 0)` header is not dropped and
+	// not SQL, so without this it reaches the seam verbatim — while its body
+	// has already become `# dropped [errorlog]`. The model is then asked to
+	// translate a status register that has no meaning in Python, from a branch
+	// whose body it cannot see. Replacing the span with the verdict the guard
+	// states is what makes the contract translatable.
+	guardLines := p.guardViewLines()
 	var out []viewEntry
 	for l := p.Flow.BodyStart; l <= p.Flow.BodyEnd && l-1 < len(lines); l++ {
 		if sqlLine[l] || hidden[l] {
+			continue
+		}
+		if text, ok := guardLines[l]; ok {
+			out = append(out, viewEntry{Line: l, Text: common.Leading(lines[l-1]) + text})
 			continue
 		}
 		if text, ok := placeholder[l]; ok {
@@ -580,6 +624,44 @@ func (p *Plan) codeViewEntries(src string) []viewEntry {
 			continue
 		}
 		out = append(out, viewEntry{Line: l, Text: lines[l-1]})
+	}
+	return out
+}
+
+// guardViewLines maps each guard's span to the neutral statement of what it
+// declares, so the seam reads a contract rather than a C status register.
+//
+// The wording names the consequence, because that is what the model has to
+// implement: "an empty result is an error" is translatable, `SQLCODE` is not.
+// The legacy line is kept in the text so a reader can still find the guard.
+func (p *Plan) guardViewLines() map[int]string {
+	out := map[int]string{}
+	for _, g := range p.Flow.Guards.Views {
+		if g.Line < p.Flow.BodyStart || g.Line > p.Flow.BodyEnd {
+			continue
+		}
+		var text string
+		switch {
+		case g.Benign:
+			// The success arm of a tolerant guard, or a fetch-loop break. It
+			// declares no failure contract, so it says exactly that.
+			text = "# no-rows case: the query succeeded and matched nothing (legacy line " +
+				strconv.Itoa(g.Line) + ")"
+		case g.Policy == contract.PolicyTolerantNoRows:
+			text = "# on failure: log and continue — an empty result is NOT an error here " +
+				"(legacy line " + strconv.Itoa(g.Line) + ")"
+		case g.Policy == contract.PolicyStrict:
+			text = "# on failure: log and abort — an empty result IS an error here " +
+				"(legacy line " + strconv.Itoa(g.Line) + ")"
+		default:
+			text = "# status guard whose polarity could not be read; treat a database " +
+				"error as a failure and an empty result as data (legacy line " +
+				strconv.Itoa(g.Line) + ")"
+		}
+		if g.Compensates {
+			text += "; the legacy branch also rolled back / closed before exiting"
+		}
+		out[g.Line] = text
 	}
 	return out
 }

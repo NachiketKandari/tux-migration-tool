@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"tux-migration-tool/internal/audit"
+	"tux-migration-tool/internal/batchflow"
 	"tux-migration-tool/internal/budget"
 	"tux-migration-tool/internal/llm"
 	"tux-migration-tool/internal/pycensus"
@@ -73,6 +74,16 @@ type Result struct {
 	// emitted output and gates nothing yet, but every construct the drop
 	// table silently ignores now has a number.
 	Census pycensus.Census
+	// Guards is the SQLCODE polarity census: how many of this program's
+	// post-query guards declared an empty result an error, how many declared
+	// it a success, and how many could not be read.
+	//
+	// It is reported rather than enforced because a non-zero Unclassified
+	// count is a coverage signal about the source, not a defect in the
+	// emitted module — the unreadable guards fall back to the per-type
+	// default, which is the pre-existing behaviour. It is carried on Result
+	// so the operator sees it without having to open the plan JSON.
+	Guards batchflow.Guards
 	Notes  []string
 	// SupportFiles are the extra files the generated module imports and the
 	// caller must write next to it (relative paths under the output dir).
@@ -184,6 +195,9 @@ func Generate(ctx context.Context, opts Options) (Result, error) {
 	res.Fidelity = fidelityOf(p, res.Content)
 	res.Retention = retentionOf(p, res.Content, serviceBody, res.Fidelity, res.LLMCalls, res.Structure, res.PyOK, res.PyMode, res.LLMFilled)
 	res.Census = censusOf(opts)
+	if p.Flow != nil {
+		res.Guards = p.Flow.Guards
+	}
 	res.SupportFiles = renderSupportFiles(prov, p)
 	return res, nil
 }

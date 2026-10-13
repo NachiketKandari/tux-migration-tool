@@ -30,6 +30,14 @@ const ControlFlowNotRendered = "R-CONTROL-FLOW-NOT-RENDERED"
 // them apart keeps the severity visible.
 const CallOutsideItsGuard = "R-CALL-OUTSIDE-ITS-GUARD"
 
+// verdictNotRendered is the one verdict that means "this construct is missing
+// work". It is a named constant because three places key off it: the tally
+// below, the guard-leak pairing, and the TODO renderer. Comparing a formatted
+// verdict against a literal in one place is how a covered branch starts being
+// counted as a gap — and the verdict text now embeds the error policy, so the
+// literal could not have matched it.
+const verdictNotRendered = "not rendered"
+
 // elidableHints are the flow idioms whose own matchNode detail says the
 // construct collapses in Go, so a helper body that omits them is complete
 // with respect to them.
@@ -132,19 +140,25 @@ func (s *Service) detFnControlFlow(h *plan.FnHelper, ordered []*detCall, nested 
 				kind:    string(n.Kind),
 				cond:    n.Cond,
 			}
+			policy := flow.ParseGuardPolicy(n.Cond)
 			switch {
-			case isSQLCodeGuard(n) && i > 0 && sqlAt[nodes[i-1].Line]:
-				// The emitter's `if err != nil { ... return -1 }` IS this
-				// check: the legacy int-status contract carries it. The
-				// branch's errlog does not come across, which is the
-				// logging posture the debug-only-if hint already
-				// establishes for the whole file.
-				item.verdict = "covered by the store call's error check"
+			case policy.IsSet() && i > 0 && sqlAt[nodes[i-1].Line]:
+				// The store call emits this check, and now emits it with the
+				// guard's own polarity: `if err != nil` for a strict guard, the
+				// ErrNoRows-tolerant form for a tolerant one. The legacy spelling
+				// matters here, because the two differ in behaviour and getting
+				// it backwards turns an empty result into a spurious failure.
+				//
+				// The branch's errlog does not come across, which is the logging
+				// posture the debug-only-if hint already establishes for the
+				// whole file.
+				item.verdict = "covered by the store call's error check (" +
+					string(policy) + ")"
 				item.rendered = true
 			case elidableHints[hints[n.Line]]:
 				item.verdict = "elided: " + string(hints[n.Line]) + " collapses in Go"
 			default:
-				item.verdict = "not rendered"
+				item.verdict = verdictNotRendered
 			}
 			rep.items = append(rep.items, item)
 			walk(n.Children)
@@ -158,7 +172,7 @@ func (s *Service) detFnControlFlow(h *plan.FnHelper, ordered []*detCall, nested 
 		switch {
 		case rep.items[i].rendered:
 			rep.rendered++
-		case rep.items[i].verdict == "not rendered":
+		case rep.items[i].verdict == verdictNotRendered:
 			rep.missing++
 		default:
 			rep.elided++
@@ -176,7 +190,7 @@ func fnFindGuardLeaks(items []fnControlFlow, ordered []*detCall, nested []detHel
 	check := func(what string, line int) {
 		best := -1
 		for i, it := range items {
-			if it.verdict != "not rendered" {
+			if it.verdict != verdictNotRendered {
 				continue
 			}
 			if line < it.line || line > it.endLine {
@@ -204,12 +218,20 @@ func fnFindGuardLeaks(items []fnControlFlow, ordered []*detCall, nested []detHel
 }
 
 // isSQLCodeGuard reports the legacy post-SQL error check: the branch that
-// tests SQLCODE immediately after an embedded SQL statement. It is the one
-// branch the deterministic emitter already renders, as the Go error check
-// the store call emits.
+// tests the status register immediately after an embedded SQL statement.
+//
+// It is the one branch the deterministic emitter already renders, as the Go
+// error check the store call emits — but "renders" no longer means "does not
+// matter". The guard's *polarity* is carried on the store call's
+// contract.ErrorPolicy (see gen.errorPolicy and the db_method_* templates), so
+// this predicate now only answers the narrower question of whether a branch is
+// the store call's own error check.
+//
+// The recognition itself lives in internal/flow (flow.ParseGuardPolicy) so the
+// batch and C# paths read the same definition. What remains here is the
+// adjacency test — is this branch the guard for a store call we just emitted?
 func isSQLCodeGuard(n *flow.Node) bool {
-	c := strings.ToLower(n.Cond)
-	return strings.Contains(c, "sqlcode") && strings.Contains(c, "!=")
+	return flow.ParseGuardPolicy(n.Cond).IsSet()
 }
 
 // detFnControlFlowTODOs renders the report as tuxconv:TODO comments.
@@ -235,7 +257,7 @@ func (r fnControlFlowReport) TODOs(goName string) []string {
 				"this method does not do",
 			ControlFlowNotRendered, goName, r.missing, r.total))
 		for _, it := range r.items {
-			if it.verdict != "not rendered" {
+			if it.verdict != verdictNotRendered {
 				continue
 			}
 			out = append(out, fmt.Sprintf("//   legacy %s at line %d: %s — not rendered",

@@ -34,7 +34,8 @@ namespace {{.Namespace}}
                 _logger.LogInformation({{.LogLine}});
 {{end}}{{end}}{{.TodoSlot}}                return {{.ReturnExpr}};
             }
-            catch (Exception ex) { throw new Exception("Error while executing {{ $action }} - " + ex.Message); }
+            catch (NoRowsException) { throw; }
+            catch (Exception ex) { throw new Exception("Error while executing {{ $action }} - " + ex.Message, ex); }
         }
 {{end}}    }
 }

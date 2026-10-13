@@ -10,6 +10,8 @@ package templates
 import (
 	"strconv"
 	"strings"
+
+	"tux-migration-tool/internal/contract"
 )
 
 // FieldSpec is one struct field in a models struct (PRD §4.8.3: json tags =
@@ -96,6 +98,37 @@ type DBMethodData struct {
 	Multi      bool   // SelectContext into []*T
 	TxParam    bool   // takes tx *sqlx.Tx as second parameter (DML / tx-variant read)
 	SuccessMsg string // insert/update debug log after a successful exec
+	// ErrPolicy is the failure contract the legacy SQLCODE guard declared for
+	// this query: does an empty result count as an error? Empty means the
+	// source said nothing, which is NOT the same as "strict" — templates must
+	// keep their existing default in that case.
+	ErrPolicy contract.ErrorPolicy
+}
+
+// TolerantNoRows reports whether the emitted method should swallow
+// sql.ErrNoRows. Only an explicitly tolerant policy may do so; an unset policy
+// defers to the template's per-type default via TolerantNoRowsDefault.
+func (d DBMethodData) TolerantNoRows() bool {
+	return d.ErrPolicy == contract.PolicyTolerantNoRows
+}
+
+// TolerantNoRowsDefault is the fallback when the source declared no policy.
+// It is the pre-existing template behaviour, preserved verbatim so adopting
+// the policy cannot change output for queries whose guard was not read.
+//
+// The switch is over every set policy rather than testing for one: an
+// unclassified policy is a verdict (a guard that was read but not understood)
+// and must not quietly resolve to a default, or the counted gap would be
+// papered over at exactly the point the census is watching.
+func (d DBMethodData) TolerantNoRowsDefault(fallback bool) bool {
+	switch d.ErrPolicy {
+	case contract.PolicyTolerantNoRows:
+		return true
+	case contract.PolicyStrict, contract.PolicyUnclassified:
+		return false
+	default:
+		return fallback
+	}
 }
 
 // ArgList renders the comma-separated bind argument names.
@@ -306,6 +339,16 @@ type DBSelectTxData struct {
 	Extract   string // "marks.String"
 	Zero      string // `""` — zero-value return on the error path
 	Return    string // "string"
+	// ErrPolicy is the failure contract the legacy SQLCODE guard declared.
+	// Unset defers to this template's existing strict propagation.
+	ErrPolicy contract.ErrorPolicy
+}
+
+// TolerantNoRows reports whether this tx read swallows sql.ErrNoRows. The
+// template's default is strict (it propagates every error); only an explicitly
+// tolerant policy relaxes that.
+func (d DBSelectTxData) TolerantNoRows() bool {
+	return d.ErrPolicy == contract.PolicyTolerantNoRows
 }
 
 // ArgList renders the comma-separated bind argument names.

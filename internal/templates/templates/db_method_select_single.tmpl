@@ -9,7 +9,11 @@ func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context{{ran
 	query := `{{.Query}}`
 
 	err := {{.Receiver}}.db.GetContext({{.CtxName}}, &{{.VarName}}, query{{if .ArgList}}, {{.ArgList}}{{end}})
+	{{if .TolerantNoRowsDefault true -}}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	{{- else -}}
+	if err != nil {
+	{{- end}}
 		logger.Log({{.CtxName}}).Error("Error: ", zap.Any("err: ", err))
 	{{- if .RowType}}
 		return nil, err

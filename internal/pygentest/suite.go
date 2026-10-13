@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"tux-migration-tool/internal/contract"
 	"tux-migration-tool/internal/pyplan"
 	"tux-migration-tool/internal/templates"
 )
@@ -73,6 +74,28 @@ type SuiteMethod struct {
 	Binds   PyList
 	Mode    string // read | write
 	Returns string // row | rows | rowcount
+	// StrictNoRows mirrors the legacy SQLCODE guard's polarity: the legacy
+	// code treated an empty result as a failure, so the generated method
+	// raises on one and the Tier-4 empty-result assertions must expect that
+	// rather than assert the opposite.
+	//
+	// False for tolerant AND unset, and the two are not the same claim — but
+	// the emitted behaviour is the same (return None), so the suite cannot
+	// tell them apart and does not need to.
+	StrictNoRows bool
+}
+
+// StrictNoRowsPy renders StrictNoRows as a Python literal.
+//
+// The distinction is not cosmetic. Go's %v on a bool writes `true`, which is
+// a NameError in the generated suite — and the suite is Python, so the
+// spelling has to be the target language's, not the emitter's. An earlier
+// version interpolated the Go bool directly and every suite died at import.
+func (m SuiteMethod) StrictNoRowsPy() string {
+	if m.StrictNoRows {
+		return "True"
+	}
+	return "False"
 }
 
 // SuiteBlock is one orchestration block of the plan's service-body contract:
@@ -151,7 +174,7 @@ func NewSuiteData(p *pyplan.Plan, src Source) SuiteData {
 		kind, mode, ret := methodShape(m)
 		d.Methods = append(d.Methods, SuiteMethod{
 			Name: m.Name, Kind: kind, Consts: PyList(m.Consts), Binds: PyList(m.Binds),
-			Mode: mode, Returns: ret,
+			Mode: mode, Returns: ret, StrictNoRows: m.ErrPolicy == contract.PolicyStrict,
 		})
 		for _, c := range m.Consts {
 			usedBy[c] = append(usedBy[c], m.Name)

@@ -13,10 +13,12 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"tux-migration-tool/internal/audit"
 	"tux-migration-tool/internal/budget"
+	"tux-migration-tool/internal/contract"
 	"tux-migration-tool/internal/csplan"
 	"tux-migration-tool/internal/llm"
 	"tux-migration-tool/internal/templates"
@@ -122,7 +124,28 @@ type QData struct {
 	MapMulti   bool
 	Props      []string
 	LogLine    string // full _logger.LogInformation(...); statement
+	// ErrPolicy is the failure contract the legacy SQLCODE guard declared.
+	// Empty means the source said nothing, which is not the same as strict —
+	// the method keeps its existing behaviour in that case.
+	ErrPolicy contract.ErrorPolicy
+	// ErrCode is the legacy errlog message id, carried into the exception
+	// message so an operator searching their log by the Pro*C code finds it.
+	ErrCode string
+	// PolicyNote is the one-line statement of what the guard decided, rendered
+	// as a doc comment above the method. It is the audit trail: a reader who
+	// asks "why does an empty result throw?" finds the legacy line that said so.
+	PolicyNote string
 }
+
+// TolerantNoRows reports whether an empty result is a success under the
+// declared policy. Unset is false — the C# empty-DataTable path is the
+// pre-existing behaviour and the policy must not override it by omission.
+func (d QData) TolerantNoRows() bool {
+	return d.ErrPolicy == contract.PolicyTolerantNoRows
+}
+
+// StrictNoRows reports whether the guard declared an empty result a failure.
+func (d QData) StrictNoRows() bool { return d.ErrPolicy == contract.PolicyStrict }
 
 type fileData struct {
 	Namespace    string
@@ -324,6 +347,8 @@ func buildEndpoints(p *csplan.Plan) ([]EpData, []QData) {
 			}
 			q := QData{
 				QueryID: qp.ID, Name: qp.Name, SQL: qp.SQL, Params: qp.Params, DML: qp.DML,
+				ErrPolicy: qp.ErrPolicy, ErrCode: qp.ErrCode,
+				PolicyNote: policyNote(qp),
 			}
 			methodSfx++
 			q.MethodName = ep.Name
@@ -396,6 +421,40 @@ const bodyIndent = 16
 func todoPlaceholder(span string) string {
 	return strings.Repeat(" ", bodyIndent) +
 		"// tuxconv:TODO residual arm logic (source lines " + span + ") — fill here or re-run with the LLM seam enabled\n"
+}
+
+// policyNote renders the one-line doc comment recording what the legacy
+// SQLCODE guard decided about an empty result.
+//
+// It exists so the polarity is auditable from the generated file alone. A
+// reviewer asking "why does this throw on an empty DataTable?" otherwise has
+// to go back to the .pc and guess; and a method that throws because its guard
+// said so and one that throws because of a template default look identical,
+// which is exactly the distinction this whole feature is about.
+func policyNote(qp csplan.QueryPlan) string {
+	// The guard's own line, not the query's end line. They differ by the
+	// whitespace (and any comment) between the statement and its guard, and an
+	// audit trail that names the wrong line sends a reader to the wrong place.
+	// Falls back to the query's span only when the plan could not record the
+	// guard's line at all.
+	line := qp.GuardLine
+	if line == 0 {
+		line = qp.Line[1]
+	}
+	switch qp.ErrPolicy {
+	case contract.PolicyStrict:
+		return "Legacy SQLCODE guard (source line " + strconv.Itoa(line) +
+			") declared an empty result an ERROR: `SQLCODE != 0`. " +
+			"An empty result is therefore raised, not returned as empty."
+	case contract.PolicyTolerantNoRows:
+		return "Legacy SQLCODE guard (source line " + strconv.Itoa(line) +
+			") declared an empty result a SUCCESS: `SQLCODE != 0 && SQLCODE != NO_DATA_FOUND`. " +
+			"An empty result is returned as an empty result, not raised."
+	case contract.PolicyUnclassified:
+		return "Legacy SQLCODE guard at source line " + strconv.Itoa(line) +
+			" could not be read; error handling follows the per-type default."
+	}
+	return "" // no guard: nothing to record, and nothing claimed
 }
 
 // sigArgs renders the repo method's parameter list: "string MobileNo, "

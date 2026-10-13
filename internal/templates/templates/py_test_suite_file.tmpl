@@ -41,6 +41,13 @@ BODY = "{{.BodyState}}"
 M = H.load(os.path.join(HERE, "{{.ModuleFile}}"), name=MODULE)
 suite = H.Suite(MODULE + " (pygentest)")
 MODE = getattr(H, "{{.ModeClass}}")
+# The module's own empty-result signal, resolved from the module under test
+# rather than re-declared here. A method whose legacy SQLCODE guard was strict
+# raises NoRowsError on an empty fetch; a tolerant or unguarded one returns
+# None. Looking it up on M keeps this suite honest about what was actually
+# generated: if the module stops defining it, the lookup is None and the
+# strict assertions report it instead of silently passing.
+NoRowsError = getattr(M, "NoRowsError", None)
 
 print("pygentest suite for %s" % MODULE)
 print("  source:     %s" % SOURCE)
@@ -62,7 +69,8 @@ CONSTS = [
 METHODS = [
 {{- range .Methods}}
     {"name": "{{.Name}}", "kind": "{{.Kind}}", "consts": {{.Consts}},
-     "binds": {{.Binds}}, "mode": "{{.Mode}}", "returns": "{{.Returns}}"},
+     "binds": {{.Binds}}, "mode": "{{.Mode}}", "returns": "{{.Returns}}",
+     "strict_no_rows": {{.StrictNoRowsPy}}},
 {{- end}}
 ]
 
@@ -118,9 +126,16 @@ def call(repo, method):
 
 def attempt(repo, method):
     """(outcome, detail) for the failure paths: "driver" when the harness's
-    DatabaseError escaped, "other" for any other exception, "" when the call
-    returned normally. The failure path has to be observed AS an exception,
-    which call() above deliberately converts into a return value."""
+    DatabaseError escaped, "no_rows" when the module's own empty-result signal
+    escaped, "other" for any other exception, "" when the call returned
+    normally. The failure path has to be observed AS an exception, which
+    call() above deliberately converts into a return value.
+
+    "no_rows" is a distinct outcome from "other" on purpose. Both mean the
+    method failed, but only one of them means it failed the way its legacy
+    SQLCODE guard said it should: a read guarded by `SQLCODE != 0` is expected
+    to raise on an empty result, and an unrelated exception would be a real
+    defect that must not be able to pass as the expected behaviour."""
     fn = getattr(repo, method["name"], None)
     if fn is None:
         return "missing", "%s has no method %s" % (REPO, method["name"])
@@ -131,6 +146,8 @@ def attempt(repo, method):
     except H.DatabaseError as exc:
         return "driver", str(exc)
     except Exception as exc:
+        if NoRowsError is not None and isinstance(exc, NoRowsError):
+            return "no_rows", str(exc)
         return "other", "%s: %s" % (type(exc).__name__, exc)
     return "", ""
 
@@ -338,12 +355,30 @@ for m in METHODS:
         continue
     router = H.DatabaseRouter()          # nothing to serve
     got, error = call(repo_cls(router), m)
-    suite.check("%s on an empty result set does not raise" % m["name"],
-                error is None, error or "")
-    if error is None:
-        suite.eq("%s on an empty result set returns %s"
-                 % (m["name"], "None" if m["returns"] == "row" else "[]"),
-                 got, None if m["returns"] == "row" else [])
+    if m.get("strict_no_rows"):
+        # The legacy guard read `SQLCODE != 0` (or the bare `if (SQLCODE)`
+        # form): an empty result was a FAILURE there, so the method raises.
+        # Asserting "does not raise" here would be asserting the opposite of
+        # the source contract.
+        #
+        # call() stringifies the exception, so the name is matched on the
+        # rendered text — via attempt(), which classifies the exception
+        # itself, rather than re-parsing a string here.
+        outcome, detail = attempt(repo_cls(router), m)
+        suite.check("%s on an empty result set raises NoRowsError, per its strict "
+                    "SQLCODE guard" % m["name"],
+                    outcome == "no_rows",
+                    "the module defines no NoRowsError, so the guard cannot be honoured"
+                    if NoRowsError is None else detail)
+        suite.eq("%s returns nothing when it raises on an empty result set" % m["name"],
+                 got, None)
+    else:
+        suite.check("%s on an empty result set does not raise" % m["name"],
+                    error is None, error or "")
+        if error is None:
+            suite.eq("%s on an empty result set returns %s"
+                     % (m["name"], "None" if m["returns"] == "row" else "[]"),
+                     got, None if m["returns"] == "row" else [])
     suite.eq("%s commits nothing when it finds nothing" % m["name"],
              router.commits, [])
     suite.eq("%s rolls nothing back when it finds nothing" % m["name"],

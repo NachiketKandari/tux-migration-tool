@@ -5,7 +5,11 @@ func ({{.Receiver}} *{{.StoreType}}) {{.Name}}({{.CtxName}} context.Context, tx 
 	query := `{{.Query}}`
 
 	err := tx.GetContext({{.CtxName}}, &{{.VarName}}, query, {{.ArgList}})
+	{{if .TolerantNoRows -}}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	{{- else -}}
 	if err != nil {
+	{{- end}}
 		logger.Log({{.CtxName}}).Error("Error executing query", zap.Error(err))
 		return {{.Zero}}, err
 	}

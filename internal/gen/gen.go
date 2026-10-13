@@ -113,6 +113,48 @@ func (s *Service) helperFlowTree(fn string) *flow.Tree {
 	return s.fnTrees[fn]
 }
 
+// guardFacts returns the scanner facts the error-policy pairing reads,
+// memoized on the same pass helperFlowTree uses. A scan failure yields empty
+// facts, which pair no guard and therefore leave every policy unset — the
+// emitter keeps its existing per-type behaviour, which is the correct outcome
+// for "the source could not be read", not a silent strict.
+func (s *Service) guardFacts() *tsscan.SourceFacts {
+	if s.scanFacts != nil {
+		return s.scanFacts
+	}
+	if strings.TrimSpace(s.source) == "" {
+		s.scanFacts = &tsscan.SourceFacts{}
+		return s.scanFacts
+	}
+	facts, err := flow.ScanForIR(s.source, s.Main)
+	if err != nil {
+		s.scanFacts = &tsscan.SourceFacts{}
+		return s.scanFacts
+	}
+	s.scanFacts = facts
+	return facts
+}
+
+// errorPolicy resolves the post-query failure contract the legacy source
+// declares for a query: does an empty result count as a failure?
+//
+// An unset result means the source stated no such contract (or the guard could
+// not be paired), and the caller must keep its existing behaviour. That
+// distinction is the point — a query with no guard and a query whose guard
+// says "strict" are different facts, and collapsing them would rewrite error
+// handling nobody asked to change.
+func (s *Service) errorPolicy(queryID string) contract.ErrorPolicy {
+	q := s.Query(queryID)
+	if q == nil {
+		return ""
+	}
+	g, ok := flow.GuardAfter(s.guardFacts(), q)
+	if !ok {
+		return ""
+	}
+	return g.Policy
+}
+
 // Profile returns the service's target profile; the goitem default when
 // unset (the zero-config default — P1: naming conventions read from the
 // profile).
@@ -619,6 +661,11 @@ func (s *Service) DBMethod(u plan.Unit) (body, signature string, needsSQL bool, 
 		CtxName:   common.GoCtx,
 		Params:    params,
 		Query:     strings.TrimRight(sql, " \t\n;"),
+		// The legacy source states, in prose, whether an empty result is a
+		// failure. Carry that across instead of re-deriving it from the SQL
+		// verb — see internal/testgen/methods.go:153-164 for what verb-derived
+		// error semantics already cost this repo.
+		ErrPolicy: s.errorPolicy(u.QueryIDs[0]),
 	}
 	needsSQL = q.Type == ir.QuerySelectSingle
 

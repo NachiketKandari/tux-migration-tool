@@ -2,6 +2,19 @@
 {{end}}
 namespace {{.Namespace}}
 {
+    /// <summary>
+    /// NoRowsException — a read matched nothing where the legacy SQLCODE guard
+    /// declared an empty result a failure (`SQLCODE != 0`).
+    ///
+    /// Distinct from a driver failure: the statement ran and succeeded, it just
+    /// had no row. Raised only for reads whose guard said so; a tolerant guard
+    /// (one that excludes NO_DATA_FOUND) returns an empty DataTable instead.
+    /// </summary>
+    public class NoRowsException : Exception
+    {
+        public NoRowsException(string message) : base(message) { }
+    }
+
     public class {{.Repo}} : I{{.Repo}}
     {
         private readonly ILogger<{{.Repo}}> _logger;
@@ -13,14 +26,42 @@ namespace {{.Namespace}}
             _dbHelperService = dbHelperService;
         }
 {{range .Endpoints}}{{range .Queries}}
+        /// <summary>{{.MethodName}}{{if .ErrCode}} (legacy code {{.ErrCode}}){{end}}</summary>
+{{- if .PolicyNote}}
+        // {{.PolicyNote}}
+{{- end}}
         public async {{if .DML}}Task<int>{{else}}Task<DataTable>{{end}} {{.MethodName}}({{.SigArgs}}CancellationToken ct)
         {
             try
             {
                 var parameters = new[] { {{.OracleArgs}} };
+{{- if and .DML .StrictNoRows}}
+                // A strict guard on DML means "zero rows affected is a failure".
+                // It is detected from the affected-row count, not from an
+                // exception: an UPDATE that matches nothing succeeds silently
+                // and returns 0 — Oracle raises nothing. A catch-based check
+                // here would be dead code that looked correct.
+                var affected = await _dbHelperService.ExecuteNonQueryAsync({{$.QueriesCls}}.{{.Name}}, CommandType.Text, parameters, ct);
+                if (affected <= 0)
+                {
+                    throw new NoRowsException("{{.Name}} affected no rows{{if .ErrCode}} ({{.ErrCode}}){{end}}");
+                }
+                return affected;
+{{- else}}
                 {{if .DML}}return await _dbHelperService.ExecuteNonQueryAsync({{$.QueriesCls}}.{{.Name}}, CommandType.Text, parameters, ct);{{else}}return await _dbHelperService.ExecuteQueryAsync({{$.QueriesCls}}.{{.Name}}, CommandType.Text, parameters, ct);{{end}}
+{{- end}}
             }
-            catch (Exception ex) { throw new Exception("{{.Name}} - " + ex.Message); }
+{{- if and (not .DML) .StrictNoRows}}
+            // An empty read is an error here because the legacy guard said so.
+            // Kept distinct from the arm below: a driver failure is a different
+            // event from a successful read that matched nothing, and collapsing
+            // them would lose that distinction for the caller.
+            catch (NoRowsException) { throw; }
+{{- end}}
+            // The inner exception is preserved so the driver's own type and
+            // code survive the wrap; `ex.Message` alone made every Oracle
+            // failure indistinguishable from every other one.
+            catch (Exception ex) { throw new Exception("{{.Name}} - " + ex.Message, ex); }
         }
 {{end}}{{end}}    }
 }

@@ -49,6 +49,27 @@ type QueryPlan struct {
 	RowProps []Prop  `json:"row_props,omitempty"`
 	DML      bool    `json:"dml,omitempty"`
 	Line     [2]int  `json:"line,omitempty"`
+	// ErrPolicy is the failure contract the legacy SQLCODE guard declared:
+	// does an empty result count as an error? Empty means the source said
+	// nothing, which is NOT the same as "strict" — the emitted method keeps
+	// its existing behaviour in that case.
+	//
+	// In C# the polarity is nearly free (an empty DataTable is not an
+	// exception either way), so what this buys is the DECISION being recorded
+	// rather than accidental: a strict guard's empty result is a result the
+	// caller must be told about, and a tolerant one is not.
+	ErrPolicy contract.ErrorPolicy `json:"err_policy,omitempty"`
+	// ErrCode is the errlog message id the guard's branch carried (the
+	// "S3nnnn" literal in the legacy errlog call), so the emitted exception
+	// can name the operator-visible code rather than only the driver's
+	// message. It is a runtime value read from the source, not a constant
+	// written here, so no customer's code is baked into this package.
+	ErrCode string `json:"err_code,omitempty"`
+	// GuardLine is the legacy line the guard itself starts on. It is NOT the
+	// query's end line: the two differ by the whitespace and any comment
+	// between the statement and its `if`, and an audit trail that points at
+	// the statement instead of the guard sends the reader to the wrong place.
+	GuardLine int `json:"guard_line,omitempty"`
 }
 
 // Guard is one runtime-dispatch guard the arm must keep live (the S7 CS
@@ -121,6 +142,26 @@ type Options struct {
 	Mapping *Mapping
 }
 
+// queryGuardPolicies maps each query to the SQLCODE guard that follows it.
+//
+// A failed scan returns an empty map rather than an error: the guard polarity
+// is an enrichment, and failing the whole C# conversion because a status
+// guard could not be located would make a best-effort fact a hard dependency.
+// An empty map leaves every policy unset, which is the pre-existing behaviour.
+func queryGuardPolicies(source string, main *ir.File) map[string]flow.Guard {
+	out := map[string]flow.Guard{}
+	facts, err := flow.ScanForIR(source, main)
+	if err != nil || facts == nil {
+		return out
+	}
+	for _, q := range main.UniqueQueries() {
+		if g, ok := flow.GuardAfter(facts, q); ok {
+			out[q.ID] = g
+		}
+	}
+	return out
+}
+
 // Build constructs the plan. Deterministic: identical inputs produce a
 // byte-identical plan.
 func Build(opts Options) (*Plan, error) {
@@ -172,6 +213,12 @@ func Build(opts Options) (*Plan, error) {
 	for _, q := range opts.Main.Queries {
 		queryByID[q.ID] = q
 	}
+	// Each query's declared post-query failure contract, read once from the
+	// same adjacency pairing the Go and batch paths use. A query with no
+	// guard is absent from the map, which is what leaves its policy unset —
+	// the C# emitter then keeps its per-type behaviour instead of inheriting
+	// another query's contract.
+	guardByQuery := queryGuardPolicies(opts.Source, opts.Main)
 	hostVars := map[string]bool{}
 	for _, hv := range opts.Main.HostVars {
 		// Only typed host vars count: the extractor's format-literal leak
@@ -300,7 +347,7 @@ func Build(opts Options) (*Plan, error) {
 			ep.QueryIDs = append(ep.QueryIDs, q.ID)
 			if !canonical[q.ID] {
 				canonical[q.ID] = true
-				qp, err := buildQueryPlan(q, m, hostVars)
+				qp, err := buildQueryPlan(q, m, hostVars, guardByQuery)
 				if err != nil {
 					return nil, fmt.Errorf("csplan: query %s: %w", q.ID, err)
 				}
@@ -436,8 +483,13 @@ func Build(opts Options) (*Plan, error) {
 // (binds filtered to declared host variables — the extractor's
 // format-literal leak like `:mi` never reaches the repo signature), and
 // DTO row props for SELECTs.
-func buildQueryPlan(q *ir.Query, m *Mapping, hostVars map[string]bool) (QueryPlan, error) {
+func buildQueryPlan(q *ir.Query, m *Mapping, hostVars map[string]bool, guards map[string]flow.Guard) (QueryPlan, error) {
 	qp := QueryPlan{ID: q.ID, SQL: cleanSQL(q.SQL), Line: [2]int{q.StartLine, q.EndLine}}
+	if g, ok := guards[q.ID]; ok {
+		qp.ErrPolicy = g.Policy
+		qp.ErrCode = g.ErrCode
+		qp.GuardLine = g.Line
+	}
 	switch q.Type {
 	case ir.QuerySelectSingle:
 		qp.Kind = "select-single"
