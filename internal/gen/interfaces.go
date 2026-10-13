@@ -255,6 +255,8 @@ func (s *Service) HandlerInterface(p *plan.Plan) (string, error) {
 		ControllerIface: s.If + "Controller",
 		ControllerCtor:  "New" + s.If + "Controller",
 		StoreCtor:       "New" + s.If + "Store",
+		ControllerPkg:   s.Mapping.ImportPath("controller"),
+		DBPkg:           s.Mapping.ImportPath("db"),
 		ReadDBs:         s.Mapping.ReadDBs,
 		CtxName:         common.GoCtx,
 	}

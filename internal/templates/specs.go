@@ -283,19 +283,30 @@ type ControllerMethodData struct {
 // + constructor + the wiring function building the store from the existing repo
 // (PRD §4.8.6, OQ11).
 type HandlerInterfaceData struct {
-	Package         string   // "handler"
-	Module          string   // "root-folder"
-	Service         string   // "item"
-	StructName      string   // "itemHandler"
-	IfaceName       string   // "ItemHandler"
-	CtorName        string   // "NewItemHandler"
-	WiringFnName    string   // "ItemController" (repo.DataObject wiring function)
-	ControllerIface string   // "ItemController"
-	ControllerCtor  string   // "NewItemController"
-	StoreCtor       string   // "NewItemStore"
-	ReadDBs         []string // "EBATEST", "PX"
-	Methods         []string
-	CtxName         string // "ctx" (common.GoCtx) — the gin context parameter
+	Package         string // "handler"
+	Module          string // "root-folder"
+	Service         string // "item"
+	StructName      string // "itemHandler"
+	IfaceName       string // "ItemHandler"
+	CtorName        string // "NewItemHandler"
+	WiringFnName    string // "ItemController" (repo.DataObject wiring function)
+	ControllerIface string // "ItemController"
+	ControllerCtor  string // "NewItemController"
+	StoreCtor       string // "NewItemStore"
+	// ControllerPkg and DBPkg are the import paths of the sibling packages
+	// this file wires together, taken from Mapping.ImportPath rather than
+	// rebuilt here. This file used to spell them
+	// "<module>/pkg/services/<service>/…", which is a second spelling of the
+	// same two packages: every other generated file imports them through
+	// ImportPath, so the emitted tree held one package under two names and
+	// did not compile. Deriving all three from one helper is what keeps them
+	// from drifting again — handler/sip.go and handler/interface.go sit in the
+	// SAME package and were importing each other by different paths.
+	ControllerPkg string   // "root-folder/controller"
+	DBPkg         string   // "root-folder/db"
+	ReadDBs       []string // "EBATEST", "PX"
+	Methods       []string
+	CtxName       string // "ctx" (common.GoCtx) — the gin context parameter
 }
 
 // ReadDBArgList renders the repo.Databases.ReadDatabase.* constructor args,

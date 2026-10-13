@@ -2,8 +2,8 @@ package {{.Package}}
 
 import (
 	"{{.Module}}/pkg/repo"
-	"{{.Module}}/pkg/services/{{.Service}}/controller"
-	"{{.Module}}/pkg/services/{{.Service}}/db"
+	controller "{{.ControllerPkg}}"
+	db "{{.DBPkg}}"
 
 	"github.com/gin-gonic/gin"
 )

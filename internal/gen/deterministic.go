@@ -1084,9 +1084,7 @@ func detEmitShaping(sb *strings.Builder, ordered []*detCall, adds []ir.FmlOp, re
 	unsourced := detUnsourced(owned, respFields)
 	for _, dc := range rows {
 		pairs := detRowPairs(dc, adds, respFields, scope, owned)
-		sb.WriteString("for _, row := range " + dc.capture + " {\n")
-		sb.WriteString("\tdata = append(data, " + detLiteral(respType, pairs, "row") + ")\n")
-		sb.WriteString("}\n")
+		detEmitRows(sb, dc.capture, respType, pairs, "row")
 	}
 	for _, dc := range singles {
 		pairs := detRowPairs(dc, adds, respFields, scope, owned)
@@ -1194,6 +1192,36 @@ func detRowPairs(dc *detCall, adds []ir.FmlOp, respFields []templates.FieldSpec,
 
 // detLiteral renders one `&models.Resp{...}` literal: mapped row fields
 // read through .String, the receiver selecting row vs single captures.
+// detEmitRows renders one multi-row read's range clause and its per-row
+// append. `recv` names the loop variable (always "row" at the call site).
+//
+// The variable is bound only when something reads it. detLiteral emits
+// `recv.Field.String` once per pair and, with no pairs, nothing at all — so
+// binding `row` unconditionally rendered
+//
+//	for _, row := range rows {
+//		data = append(data, &models.XResponse{})
+//	}
+//
+// and Go rejected it: "declared and not used: row". An unused import or
+// parameter is legal; an unused local is not, so the whole controller file
+// failed to compile on any multi-row read whose response fields could not be
+// attributed to it.
+//
+// With no pairs the range carries nothing this body needs, so it drops the
+// variables entirely rather than substituting `_`. `for _, _ :=` is not the
+// escape: a short variable declaration needs at least one new non-blank name,
+// so that form is itself a compile error.
+func detEmitRows(sb *strings.Builder, capture, respType string, pairs []detFieldMap, recv string) {
+	clause := "for range " + capture
+	if len(pairs) > 0 {
+		clause = "for _, " + recv + " := range " + capture
+	}
+	sb.WriteString(clause + " {\n")
+	sb.WriteString("\tdata = append(data, " + detLiteral(respType, pairs, recv) + ")\n")
+	sb.WriteString("}\n")
+}
+
 func detLiteral(respType string, pairs []detFieldMap, recv string) string {
 	var sb strings.Builder
 	sb.WriteString("&models." + respType + "{")
