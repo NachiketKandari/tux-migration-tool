@@ -60,6 +60,7 @@ func cursorUnit(facts *tsscan.SourceFacts, s tsscan.ExecSQLStatement, fetchInto 
 		}
 	}
 	q.RowShape = fetchInto[cursorKey(rawName)]
+	q.FetchSites = fetchSitesInWindow(facts, rawName, s.StartLine, math.MaxInt)
 	return q
 }
 
@@ -85,6 +86,16 @@ func embeddedCursorUnit(facts *tsscan.SourceFacts, s tsscan.ExecSQLStatement, fe
 	} else {
 		q.RowShape = fetchInto[cursorKey(rawName)]
 	}
+	// FetchSites records the fetches RowShape was drawn from: the open's own
+	// window, widened to the whole cursor only when that window holds none —
+	// the same fallback the shape above makes. So RowShape is always the
+	// first listed site carrying an INTO list, and a fetch that fell outside
+	// the window shows up as an absence here rather than silently.
+	q.FetchSites = fetchSitesInWindow(facts, rawName, s.StartLine, window)
+	if len(q.FetchSites) == 0 {
+		q.FetchSites = fetchSitesInWindow(facts, rawName, s.StartLine, math.MaxInt)
+		q.FetchSitesWidened = true
+	}
 	q.EndLine = embeddedSpanEnd(facts, rawName, s.StartLine, window, q.EndLine)
 	return q
 }
@@ -105,7 +116,7 @@ func newMultiUnit(rawName, body string, s tsscan.ExecSQLStatement, used map[stri
 		Sites:           []int{s.StartLine},
 	}
 	q.Tables, q.Aliases = parseTables(body, tsscan.SQLSelect)
-	q.Binds, q.BindArity = collectBinds(scanHostRefs(body, 0, len(body)))
+	q.Binds, q.BindCount = collectBinds(scanHostRefs(body, 0, len(body)))
 	q.OrderBy = parseOrderBy(body)
 	q.DedupKey = body
 	return q
@@ -312,7 +323,7 @@ func selectUnit(s tsscan.ExecSQLStatement, counter int) *Query {
 		Sites:          []int{s.StartLine},
 	}
 	q.Tables, q.Aliases = parseTables(s.Normalized, tsscan.SQLSelect)
-	q.Binds, q.BindArity = collectBinds(binds)
+	q.Binds, q.BindCount = collectBinds(binds)
 	q.OrderBy = parseOrderBy(s.Normalized)
 	q.RowShape = into
 	q.DedupKey = s.Normalized
@@ -341,9 +352,73 @@ func dmlUnit(s tsscan.ExecSQLStatement, counter int) *Query {
 		Sites:          []int{s.StartLine},
 	}
 	q.Tables, q.Aliases = parseTables(s.Normalized, s.Kind)
-	q.Binds, q.BindArity = collectBinds(scanHostRefs(s.Normalized, 0, len(s.Normalized)))
+	q.Binds, q.BindCount = collectBinds(scanHostRefs(s.Normalized, 0, len(s.Normalized)))
 	q.DedupKey = s.Normalized
 	return q
+}
+
+// fetchSitesInWindow lists every FETCH of `cursor` starting at or after
+// `from` and strictly before `window`, in source order. Pass math.MaxInt for
+// the whole file.
+func fetchSitesInWindow(facts *tsscan.SourceFacts, cursor string, from, window int) []FetchSite {
+	var out []FetchSite
+	for _, s := range facts.AllSQL {
+		if s.Kind != tsscan.SQLFetch || s.StartLine < from || s.StartLine >= window {
+			continue
+		}
+		if !SameCursor(s.CursorName, cursor) {
+			continue
+		}
+		out = append(out, FetchSite{Line: s.StartLine, Into: parseIntoList(s.Normalized)})
+	}
+	return out
+}
+
+// RowShapeDivergent reports whether the fetches listed in FetchSites disagree
+// on their INTO list. RowShape resolves to the first of them, so the later
+// lists are recorded but not reachable through RowShape.
+//
+// Read it with FetchSitesWidened: false means two fetches inside this open's
+// own window disagree, which is the shape of a real loss. true means the
+// sites span sibling opens because the row shape was borrowed from outside
+// this open, and the other lists belong to other units — review, but this
+// unit's own row shape is not in doubt.
+func (q *Query) RowShapeDivergent() bool {
+	var first string
+	seen := false
+	for _, fs := range q.FetchSites {
+		if len(fs.Into) == 0 {
+			continue
+		}
+		key := strings.Join(fs.Into, ",")
+		if !seen {
+			first, seen = key, true
+			continue
+		}
+		if key != first {
+			return true
+		}
+	}
+	return false
+}
+
+// dedupKey is the key units are grouped by. For a flattened cursor the row
+// shape participates: two opens whose SQL matches but whose FETCH INTO
+// targets differ are NOT the same statement, and collapsing them would drop
+// the second row shape. DedupKey itself stays the bare SQL body so audit
+// output is unaffected; this is the effective key.
+//
+// Non-cursor units are untouched — their DedupKey is the whole normalized
+// statement (selectUnit/dmlUnit), which already contains the INTO list. A
+// cursor with no resolvable row shape keeps its bare body key too, so ghost
+// and half cursors are not split by an empty shape that says nothing. An
+// empty body stays ungrouped either way: linkDuplicates skips empty keys, and
+// joining a shape onto nothing would invent a key two unrelated cursors share.
+func (q *Query) dedupKey() string {
+	if q.DedupKey == "" || !q.CursorFlattened || len(q.RowShape) == 0 {
+		return q.DedupKey
+	}
+	return q.DedupKey + "\x00" + strings.Join(q.RowShape, ",")
 }
 
 // linkDuplicates marks later units with identical dedup keys as duplicates
@@ -351,14 +426,15 @@ func dmlUnit(s tsscan.ExecSQLStatement, counter int) *Query {
 func linkDuplicates(qs []*Query) {
 	first := map[string]string{}
 	for _, q := range qs {
-		if q.DedupKey == "" {
+		key := q.dedupKey()
+		if key == "" {
 			continue
 		}
-		if id, ok := first[q.DedupKey]; ok {
+		if id, ok := first[key]; ok {
 			q.DuplicateOf = id
 			continue
 		}
-		first[q.DedupKey] = q.ID
+		first[key] = q.ID
 	}
 }
 
@@ -509,7 +585,7 @@ func splitSelectRefs(norm string) (binds, into []string) {
 // String literals are skipped. A literal is data, never Pro*C syntax, and the
 // Oracle time mask is exactly the shape an unquoted scan harvests phantom host
 // variables from: `TO_CHAR(A_DATE,'HH24:MI:SS')` yields :MI and :SS, which
-// land in Binds and inflate BindArity — and with it the generated parameter
+// land in Binds and inflate BindCount — and with it the generated parameter
 // list, since internal/gen builds ParamSpecs straight from Query.Binds.
 // sqltext.ExecutableBinds already scans literals correctly; this brings the
 // IR's own scan to the same discipline so the two can never disagree about

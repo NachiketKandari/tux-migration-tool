@@ -352,6 +352,13 @@ type HostVar struct {
 	InDeclareSection bool   `json:"in_declare_section,omitempty"`
 }
 
+// FetchSite is one FETCH of a flattened cursor: the line it sits on and the
+// host-variable list it scanned into.
+type FetchSite struct {
+	Line int      `json:"line"`
+	Into []string `json:"into,omitempty"`
+}
+
 // Query is one database unit. Cursor units carry the cursor's raw-case name
 // as both ID and CursorName, with CursorFlattened marking the
 // DECLARE→CLOSE choreography folded into a single SELECT_MULTI. Duplicates
@@ -370,13 +377,27 @@ type Query struct {
 	CursorFlattened bool      `json:"cursor_flattened,omitempty"`
 	Tables          []string  `json:"tables"`
 	Binds           []string  `json:"binds"`
-	BindArity       int       `json:"bind_arity"`
+	BindCount       int       `json:"bind_count"`
 	RowShape        []string  `json:"row_shape,omitempty"`
-	OrderBy         string    `json:"order_by,omitempty"`
-	Sites           []int     `json:"sites"`
-	DedupKey        string    `json:"dedup_key"`
-	DuplicateOf     string    `json:"duplicate_of,omitempty"`
-	DefinedBy       string    `json:"defined_by,omitempty"`
+	// FetchSites is every FETCH that could have fed this unit's row shape,
+	// in source order, each with the host-variable list it scanned into.
+	// Empty for non-cursor units. RowShape remains the unit's resolved
+	// shape (the first FETCH carrying an INTO list, within the open's own
+	// window where one exists) — this field records what the others were,
+	// it does not change the choice. See RowShapeDivergent.
+	FetchSites []FetchSite `json:"fetch_sites,omitempty"`
+	// FetchSitesWidened marks FetchSites as the whole cursor's rather than
+	// the open's own window — the open's window held no fetch, so the row
+	// shape was borrowed from the cursor's first fetch instead. The listed
+	// sites then belong to sibling opens as well as this one, so a
+	// RowShapeDivergent here does not mean this unit's shape is wrong; it
+	// means the shape was taken from outside the open that produced it.
+	FetchSitesWidened bool   `json:"fetch_sites_widened,omitempty"`
+	OrderBy           string `json:"order_by,omitempty"`
+	Sites             []int  `json:"sites"`
+	DedupKey          string `json:"dedup_key"`
+	DuplicateOf       string `json:"duplicate_of,omitempty"`
+	DefinedBy         string `json:"defined_by,omitempty"`
 }
 
 // Condition is one member of the entry function's top-level dispatch chain.
@@ -511,10 +532,11 @@ func (f *File) UniqueQueries() []*Query {
 	seen := make(map[string]bool, len(f.Queries))
 	out := make([]*Query, 0, len(f.Queries))
 	for _, q := range f.Queries {
-		if seen[q.DedupKey] {
+		key := q.dedupKey()
+		if seen[key] {
 			continue
 		}
-		seen[q.DedupKey] = true
+		seen[key] = true
 		out = append(out, q)
 	}
 	return out

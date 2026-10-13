@@ -114,9 +114,14 @@ type ColumnValue struct {
 }
 
 // CursorReport is one cursor's lifecycle across the entry: the opens that
-// produced units and the FETCH choreography behind them. Fetch sites and
-// INTO-target variants come from the scan, because the IR records only the
-// first FETCH's row shape.
+// produced units and the FETCH choreography behind them.
+//
+// The statement counts and the FETCH line census come from the scan, because
+// they are properties of the choreography as written — a cursor no unit ended
+// up modelling still has fetches worth counting. What each unit actually
+// resolved to — the INTO lists and whether they disagreed — is read from the
+// IR (Query.FetchSites / Query.RowShapeDivergent), so the report no longer
+// has to reconstruct a fact the IR now carries.
 type CursorReport struct {
 	Name  string   `json:"name"`
 	Units []string `json:"units,omitempty"`
@@ -130,11 +135,20 @@ type CursorReport struct {
 	Closes        int `json:"closes"`
 	// FetchSites is every FETCH line, ascending.
 	FetchSites []int `json:"fetch_sites,omitempty"`
-	// FetchVariants counts the distinct FETCH statements of this cursor.
-	// >1 means one cursor is fetched into more than one set of host
-	// variables — see Known blind spots.
+	// FetchVariants counts the distinct FETCH INTO lists the IR recorded for
+	// this cursor. >1 means one cursor is fed into more than one set of host
+	// variables.
 	FetchVariants int  `json:"fetch_variants"`
 	Divergent     bool `json:"row_shape_divergent,omitempty"`
+	// DivergentUnits are units where two fetches INSIDE the unit's own open
+	// window disagree — the row shape is one of several and the others reach
+	// nothing. This is the case to review.
+	DivergentUnits []string `json:"divergent_units,omitempty"`
+	// WidenedUnits are units whose open window held no fetch, so the row
+	// shape was borrowed from the cursor's first fetch. Their variant count
+	// spans sibling opens and their own row shape is not in doubt, but the
+	// provenance is worth a glance.
+	WidenedUnits []string `json:"widened_units,omitempty"`
 }
 
 // QueryReuseReport is the <entry>.qreuse.json record.
@@ -398,17 +412,35 @@ func selectDrift(qs []*ir.Query, items []map[string]string) []MemberDrift {
 	return out
 }
 
-// buildCursors reads the scanned choreography per cursor name. Fetch sites and
-// INTO-target variants come from the scanner facts, because the IR records
-// only the first FETCH's row shape.
+// buildCursors reads the scanned choreography per cursor name. The counts and
+// the FETCH line census come from the scan; the INTO variants and the
+// divergence come from the IR's per-unit FetchSites.
 func buildCursors(irFile *ir.File, tree *Tree) []*CursorReport {
 	unitsByCursor := map[string][]string{}
+	variants := map[string]map[string]bool{}
+	divergent := map[string][]string{}
+	widened := map[string][]string{}
 	for _, q := range irFile.Queries {
 		if q.CursorName == "" {
 			continue
 		}
 		k := upperName(q.CursorName)
 		unitsByCursor[k] = append(unitsByCursor[k], q.ID)
+		if variants[k] == nil {
+			variants[k] = map[string]bool{}
+		}
+		for _, fs := range q.FetchSites {
+			if len(fs.Into) == 0 {
+				continue
+			}
+			variants[k][strings.Join(fs.Into, ",")] = true
+		}
+		if q.FetchSitesWidened {
+			widened[k] = append(widened[k], q.ID)
+		}
+		if q.RowShapeDivergent() {
+			divergent[k] = append(divergent[k], q.ID)
+		}
 	}
 	if tree == nil || tree.facts == nil {
 		return nil
@@ -442,37 +474,27 @@ func buildCursors(irFile *ir.File, tree *Tree) []*CursorReport {
 	for _, name := range sortedMapKeys(byCursor) {
 		rep := byCursor[name]
 		rep.Units = unitsByCursor[name]
-		rep.FetchVariants = fetchVariants(tree, name)
+		rep.FetchVariants = len(variants[name])
 		rep.Divergent = rep.FetchVariants > 1
+		// Split the divergent units by provenance: only those that saw two
+		// disagreeing fetches inside their own open window have a row shape
+		// in doubt. The rest borrowed their shape from outside their window.
+		for _, id := range divergent[name] {
+			if listHas(widened[name], id) {
+				continue
+			}
+			rep.DivergentUnits = append(rep.DivergentUnits, id)
+		}
+		rep.WidenedUnits = widened[name]
 		out = append(out, rep)
 	}
 	return out
 }
 
-// fetchVariants counts the distinct FETCH statements of one cursor. Two
-// fetches with the same INTO list carry the same key, so counting distinct
-// keys is a sound (if coarse) divergence test needing no INTO parser.
-//
-// sqltext.SemanticKey is deliberately NOT used here: it strips the
-// host-variable INTO list as Pro*C noise, and on a FETCH that list is the very
-// fact under comparison — every fetch would collapse to "FETCH :cur" and the
-// divergence would read as absent. Uppercasing and dropping whitespace is
-// enough: a FETCH's INTO list is identifiers and commas only.
-func fetchVariants(tree *Tree, cursor string) int {
-	seen := map[string]bool{}
-	for _, s := range tree.facts.AllSQL {
-		if s.Kind != scanner.SQLFetch || upperName(s.CursorName) != cursor {
-			continue
-		}
-		seen[strings.ToUpper(strings.Join(strings.Fields(s.Normalized), ""))] = true
-	}
-	return len(seen)
-}
-
 // bindBlindSpots reports units whose IR bind list disagrees with the
 // literal-aware scan. The IR's scanHostRefs is not literal-aware, so an Oracle
 // time mask like 'hh:mi:ss' inside the statement harvests as the host
-// variables :mi and :ss — inflating BindArity and, on the codegen paths that
+// variables :mi and :ss — inflating BindCount and, on the codegen paths that
 // read Query.Binds directly, the generated parameter list.
 func bindBlindSpots(irFile *ir.File) []string {
 	var out []string
@@ -665,10 +687,18 @@ func RenderQueryReuseMD(r *QueryReuseReport) string {
 		}
 		sb.WriteString("\n")
 		for _, c := range r.Cursors {
-			if c.Divergent {
+			if len(c.DivergentUnits) > 0 {
 				fmt.Fprintf(&sb,
-					"- `%s`: fetched at lines %s into more than one set of host variables. The IR keeps\n  only the FIRST FETCH's row shape (`fetchIntoByCursor`, internal/ir/query.go), so the\n  other targets never reach codegen.\n",
-					c.Name, joinInts(c.FetchSites))
+					"- `%s`: two FETCHes inside the same open's window scan into different host\n  variables, so %s resolved its row shape from the first and the other INTO list\n  reaches nothing. Fetch lines: %s.\n",
+					c.Name, bulletInline(c.DivergentUnits), joinInts(c.FetchSites))
+			}
+		}
+		if widened := widenedCursors(r.Cursors); len(widened) > 0 {
+			sb.WriteString("\n")
+			for _, c := range widened {
+				fmt.Fprintf(&sb,
+					"- `%s`: %s have no FETCH inside their own open window, so the row shape was\n  borrowed from the cursor's first FETCH. The shape is right for all of them — the\n  note is provenance, not a loss.\n",
+					c.Name, bulletInline(c.WidenedUnits))
 			}
 		}
 		sb.WriteString("\n")
@@ -676,15 +706,30 @@ func RenderQueryReuseMD(r *QueryReuseReport) string {
 
 	sb.WriteString("## Known blind spots\n\n")
 	sb.WriteString("This report is read-only. The following are losses in the IR itself; they\nare surfaced here rather than fixed.\n\n")
+	// A fixed problem must not keep being reported as a blind spot: the
+	// cursor DedupKey now folds in the row shape, so two opens that differ
+	// only in their FETCH INTO targets no longer fold together.
 	spots := append([]string(nil), r.BlindSpots...)
 	spots = append(spots,
-		"Cursor `DedupKey` excludes the row shape: `newMultiUnit` (internal/ir/query.go)\n  sets DedupKey from the SELECT body *before* the row shape is assigned, so two\n  opens of one cursor with identical SQL but different FETCH INTO targets would fold\n  together and the second row shape would be lost.",
-		"Fetch sites are not IR facts: `Query.Sites` records only the DECLARE/OPEN line,\n  so the fetch counts and variants above are reconstructed from the scan.",
+		"FETCH INTO targets are recorded per unit (`Query.FetchSites`) but only the first one\n  resolves into `RowShape`, which is what codegen reads. A cursor whose fetches disagree\n  keeps the rest as data no emitter consults — see Cursor lifecycle.",
+		"The FETCH line census above is a scan fact, not an IR fact: `Query.Sites` records only\n  the DECLARE/OPEN line. The INTO lists and the divergence are IR facts; where the lines\n  are is still reconstructed from the scan.",
 	)
 	for _, s := range spots {
 		fmt.Fprintf(&sb, "- %s\n", s)
 	}
 	return sb.String()
+}
+
+// widenedCursors are cursors with at least one unit that borrowed its row
+// shape from outside its own open window.
+func widenedCursors(cs []*CursorReport) []*CursorReport {
+	var out []*CursorReport
+	for _, c := range cs {
+		if len(c.WidenedUnits) > 0 {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func hasExtras(f *ReuseFamily) bool {
